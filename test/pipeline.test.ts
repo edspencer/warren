@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { InjectedMcpServerDef, TriggerResult } from "@herdctl/core";
 import { createReviewPipeline } from "../src/review/pipeline.js";
 import { createReviewTargetProvider } from "../src/review/target.js";
+import { fingerprint } from "../src/review/fingerprint.js";
 import type { FleetWrapper } from "../src/herd/fleet.js";
 import type { LocalGitTarget, Logger, ReviewEvent, WarrenConfig } from "../src/types.js";
 import { runGit } from "../src/review/target.js";
@@ -53,14 +54,26 @@ const target = (): LocalGitTarget => ({
 const HIGH = {
   path: "src/new.ts",
   line: 1,
+  side: "RIGHT" as const,
   severity: "high",
   category: "bug",
   title: "Exported constant is never validated",
   body: "The exported `x` is used downstream without a bounds check.",
 };
+// A real-severity finding that the verify pass will REFUTE (keep:false) → gate drops it.
+const MED = {
+  path: "a.txt",
+  line: 2,
+  side: "RIGHT" as const,
+  severity: "medium",
+  category: "correctness",
+  title: "CHANGED may not be reachable",
+  body: "Speculative concern the verifier disproves.",
+};
 const LOW = {
   path: "a.txt",
   line: 2,
+  side: "RIGHT" as const,
   severity: "low",
   category: "style",
   title: "Prefer a clearer marker than CHANGED",
@@ -101,6 +114,11 @@ async function callTool(
   if (tool) await tool.handler(args as never);
 }
 
+/** Emit assistant TEXT the way the real runtime does — the verify pass reads this. */
+function emitText(opts: { onMessage?: (m: never) => void | Promise<void> }, text: string): void {
+  opts.onMessage?.({ type: "assistant", message: { content: [{ type: "text", text }] } } as never);
+}
+
 function fakeFleet(): FleetWrapper {
   let n = 0;
   const ok = (agentName: string): TriggerResult => ({
@@ -119,13 +137,19 @@ function fakeFleet(): FleetWrapper {
     async trigger(agentName, opts) {
       if (agentName.startsWith("reviewer-")) {
         await callTool(opts.injectedMcpServers, "submit_review", {
-          summary: "Two issues found.",
+          summary: "Three issues found.",
           walkthrough: "Walkthrough: changed a.txt and added src/new.ts.",
-          findings: [HIGH, LOW],
+          findings: [HIGH, MED, LOW],
         });
       } else if (agentName.startsWith("verify-")) {
-        // Survivor: the HIGH finding (same path/category/title → same fingerprint).
-        await callTool(opts.injectedMcpServers, "submit_finding", { ...HIGH, confidence: 0.9 });
+        // Verify now returns a JSON verdict ARRAY as free-form TEXT (no MCP tool call):
+        // keep the HIGH finding, explicitly refute the MED one. Wrapped in prose + a
+        // markdown fence to exercise the robust extractor.
+        const verdicts = [
+          { id: fingerprint(HIGH), keep: true, confidence: 0.9, reason: "Confirmed: no bounds check." },
+          { id: fingerprint(MED), keep: false, confidence: 0.1, reason: "Refuted: line is reachable." },
+        ];
+        emitText(opts, `Here are my verdicts:\n\`\`\`json\n${JSON.stringify(verdicts)}\n\`\`\`\n`);
       }
       return ok(agentName);
     },
@@ -158,13 +182,17 @@ describe("createReviewPipeline (offline, fake fleet + local-git)", () => {
 
     // Produced a ReviewResult with the review posted.
     expect(result.posted).toBe(true);
-    expect(result.stats.findingsRaw).toBe(2);
+    expect(result.stats.findingsRaw).toBe(3);
 
-    // Gate dropped the below-threshold (low) finding; kept the high one.
+    // The HIGH finding SURVIVED verify (via a JSON-text verdict) and was posted.
     expect(result.stats.findingsPosted).toBe(1);
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0].severity).toBe("high");
     expect(result.findings[0].verified).toBe(true);
+    expect(result.findings[0].confidence).toBeCloseTo(0.9);
+    // Verify explicitly REFUTED the MED finding (keep:false) → dropped by the gate.
+    expect(result.findings.some((f) => f.title === MED.title)).toBe(false);
+    // The below-threshold LOW finding was dropped on severity.
     expect(result.findings.some((f) => f.title === LOW.title)).toBe(false);
 
     // A local markdown report was written and contains the surviving finding.
@@ -172,7 +200,9 @@ describe("createReviewPipeline (offline, fake fleet + local-git)", () => {
     const files = await readdir(reviewsDir);
     expect(files.length).toBeGreaterThan(0);
     const report = await readFile(join(reviewsDir, files[0]), "utf8");
+    expect(report).toContain("## Findings (1)");
     expect(report).toContain(HIGH.title);
+    expect(report).not.toContain(MED.title);
     expect(report).not.toContain(LOW.title);
     expect(report).toContain(result.findings[0].fingerprint);
   });

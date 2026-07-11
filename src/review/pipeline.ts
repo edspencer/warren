@@ -29,7 +29,7 @@ import { runAgentTurn } from "../herd/run.js";
 import { reviewerAgentConfig, triageAgentConfig, verifyAgentConfig } from "../herd/reviewer.js";
 import { fingerprint, encodeFindingMarker } from "./fingerprint.js";
 import { gateFindings, meetsSeverity } from "./gate.js";
-import { buildReviewPrompt, buildReviewSystemAppend, buildTriagePrompt, buildVerifyPrompt, toPromptContext } from "./prompts.js";
+import { buildBatchVerifyPrompt, buildReviewPrompt, buildReviewSystemAppend, buildTriagePrompt, toPromptContext } from "./prompts.js";
 import { createReviewTargetProvider, type MaterializedTarget, type ReviewTargetProvider } from "./target.js";
 
 /** The sticky walkthrough marker (SPEC §3.8 step 7). */
@@ -160,7 +160,7 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
     const toVerify = rawFindings.filter((f) => meetsSeverity(f.severity, cfg.minSeverity));
     let survivors: Map<string, { keep: boolean; confidence: number }> | null = null;
     if (verifyEnabled && toVerify.length > 0) {
-      survivors = await runVerifyPass(deps, target, mt, cfg, slug, client, toVerify);
+      survivors = await runVerifyPass(deps, mt, cfg, slug, toVerify);
     }
 
     const candidates: Finding[] = rawFindings.map((rf) =>
@@ -215,67 +215,135 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
 // ─────────────────────────── Verify pass ───────────────────────────
 
 /**
- * ONE batched verify turn: a verify agent inspects every candidate and RE-SUBMITS
- * (via its own github_pr collector) the findings that survive refutation. We match
- * survivors back to candidates by fingerprint. Token-thrifty vs one turn per finding.
+ * ONE batched verify turn (JSON-verdict path). A verify agent inspects every candidate
+ * and returns a JSON ARRAY of `{ id, keep, confidence, reason }` verdicts as TEXT (no
+ * MCP tool call in the verify turn). We parse that text, map verdicts back to candidates
+ * by fingerprint, and FAIL OPEN: any candidate lacking a parseable verdict is kept at a
+ * low confidence so a flaky/garbled verify turn can never silently drop everything.
  */
 async function runVerifyPass(
   deps: ReviewPipelineDeps,
-  target: ReviewTarget,
   mt: MaterializedTarget,
   cfg: WarrenConfig,
   slug: string,
-  client: GitHubClient | null,
   findings: RawFinding[],
 ): Promise<Map<string, { keep: boolean; confidence: number }>> {
   const verifyName = `verify-${slug}`;
   await deps.fleet.addReviewAgent(
     verifyAgentConfig({ name: verifyName, workingDir: mt.checkoutDir, model: cfg.models.verify }),
   );
-  const verifyMcp = createGithubPrMcp({
-    client,
-    target,
-    logger: deps.logger,
-    existingFindings: findings,
-  });
-  await runAgentTurn({
+  const ctx = toPromptContext(mt, cfg);
+  const { text } = await runAgentTurn({
     fleet: deps.fleet,
     agentName: verifyName,
-    prompt: buildBatchVerifyPrompt(findings, mt, cfg),
-    injectedMcpServers: { github_pr: verifyMcp.def },
+    prompt: buildBatchVerifyPrompt(findings, ctx),
     logger: deps.logger,
   });
 
+  // Fail-open baseline: every candidate keeps at low confidence unless a verdict overrides.
   const survivors = new Map<string, { keep: boolean; confidence: number }>();
-  for (const sf of verifyMcp.collector.getFindings()) {
-    survivors.set(fingerprint(sf), { keep: true, confidence: sf.confidence ?? 0.8 });
+  for (const f of findings) {
+    survivors.set(fingerprint(f), { keep: true, confidence: FAIL_OPEN_CONFIDENCE });
+  }
+
+  const verdicts = parseVerifyVerdicts(text);
+  if (!verdicts) {
+    deps.logger.warn(
+      `pipeline: verify pass returned no parseable verdict JSON for ${slug}; failing open (keeping ${findings.length} candidate(s) at low confidence).`,
+    );
+    return survivors;
+  }
+
+  const byFp = new Map(findings.map((f) => [fingerprint(f), f] as const));
+  for (const v of verdicts) {
+    const fp = matchVerdictFp(v, byFp);
+    if (!fp) continue;
+    survivors.set(fp, {
+      keep: v.keep !== false, // default keep unless explicitly refuted
+      confidence: clampConfidence(v.confidence, v.keep === false ? 0 : FAIL_OPEN_CONFIDENCE),
+    });
   }
   return survivors;
 }
 
+/** Confidence used when a candidate keeps but has no explicit verify score (>= gate min). */
+const FAIL_OPEN_CONFIDENCE = 0.5;
+
+interface VerifyVerdict {
+  id?: unknown;
+  fingerprint?: unknown;
+  keep?: unknown;
+  confidence?: unknown;
+  reason?: unknown;
+}
+
+/** Match a verdict's id/fingerprint field to a known candidate fingerprint. */
+function matchVerdictFp(v: VerifyVerdict, byFp: Map<string, RawFinding>): string | null {
+  for (const raw of [v.id, v.fingerprint]) {
+    if (typeof raw === "string" && byFp.has(raw)) return raw;
+  }
+  return null;
+}
+
+/** Coerce a verdict `confidence` into 0..1, falling back to `dflt` when absent/invalid. */
+function clampConfidence(c: unknown, dflt: number): number {
+  const n = typeof c === "number" ? c : typeof c === "string" ? Number(c) : NaN;
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(1, Math.max(0, n));
+}
+
 /**
- * Compose a single batched verify prompt from the per-finding adversarial prompt
- * (prompts.ts) plus one instruction: re-submit ONLY the survivors via the github_pr
- * MCP so the pipeline can read them back. Built here (not prompts.ts) to avoid
- * editing another slice; each finding block reuses `buildVerifyPrompt`.
+ * Robustly extract the JSON verdict ARRAY from an agent's free-form text: strip Markdown
+ * code fences and surrounding prose, then parse the first balanced `[`…`]` span. Returns
+ * null when nothing parseable is found (caller fails open).
  */
-function buildBatchVerifyPrompt(findings: RawFinding[], mt: MaterializedTarget, cfg: WarrenConfig): string {
-  const ctx = toPromptContext(mt, cfg);
-  const blocks = findings.map((f, i) => `### Candidate ${i + 1}\n${buildVerifyPrompt(f, ctx)}`);
-  return [
-    "You are Warren's adversarial VERIFIER running a BATCHED pass over several proposed",
-    "findings. For EACH candidate below, try to refute it with concrete evidence from the",
-    "checkout in your working directory.",
-    "",
-    "## Output protocol",
-    "Call `mcp__github_pr__submit_finding` ONCE for every candidate that SURVIVES refutation",
-    "(the concern is genuinely substantiated), copying its `path`, `line`, `side`, `severity`,",
-    "`category`, `title`, and `body` VERBATIM and setting `confidence` to your 0..1 belief.",
-    "Do NOT submit candidates you refuted or could not substantiate. Then call",
-    "`mcp__github_pr__submit_review` once with a one-line summary of the verification.",
-    "",
-    ...blocks,
-  ].join("\n");
+export function parseVerifyVerdicts(text: string): VerifyVerdict[] | null {
+  if (!text) return null;
+  const candidates: string[] = [];
+
+  // Prefer a fenced ```json … ``` block if present.
+  const fence = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let fm: RegExpExecArray | null;
+  while ((fm = fence.exec(text)) !== null) candidates.push(fm[1]);
+  // Fall back to scanning the whole text for a bracketed array.
+  candidates.push(text);
+
+  for (const chunk of candidates) {
+    const span = firstArraySpan(chunk);
+    if (!span) continue;
+    try {
+      const parsed = JSON.parse(span);
+      if (Array.isArray(parsed)) return parsed as VerifyVerdict[];
+    } catch {
+      // try the next candidate chunk
+    }
+  }
+  return null;
+}
+
+/** Return the first balanced `[`…`]` substring of `s`, honoring quotes/escapes, or null. */
+function firstArraySpan(s: string): string | null {
+  const start = s.indexOf("[");
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return null;
 }
 
 // ─────────────────────────── Finding finalization ───────────────────────────

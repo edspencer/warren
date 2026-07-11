@@ -15,6 +15,8 @@ import type {
 } from "../types.js";
 import type { GitHubClient } from "../github/client.js";
 import type { ReviewStateStore } from "../state/store.js";
+import { PollTriggerSource } from "./poll.js";
+import { WebhookStubTriggerSource } from "./webhook-stub.js";
 
 export interface TriggerSource {
   /** Begin producing ReviewEvents. `emit` is called once per event; it must not throw. */
@@ -55,13 +57,9 @@ export function createTriggerSource(
   mode: TriggerMode,
   deps: TriggerSourceDeps,
 ): TriggerSource {
-  // Lazy requires avoid an eager import cycle (poll/webhook import this module's types).
+  // poll/webhook only import this module's *types*, so static imports create no cycle.
   if (mode === "webhook" || mode === "tunnel") {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { WebhookStubTriggerSource } = require("./webhook-stub.js") as typeof import("./webhook-stub.js");
     return new WebhookStubTriggerSource(deps, mode);
   }
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { PollTriggerSource } = require("./poll.js") as typeof import("./poll.js");
   return new PollTriggerSource(deps);
 }

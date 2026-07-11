@@ -14,6 +14,7 @@
 import type { PrFile } from "../github/index.js";
 import type { RawFinding, Severity, WarrenConfig } from "../types.js";
 import type { MaterializedTarget } from "./target.js";
+import { fingerprint } from "./fingerprint.js";
 
 // ─────────────────────────── Context ───────────────────────────
 
@@ -265,5 +266,57 @@ export function buildVerifyPrompt(finding: RawFinding, ctx: PromptContext): stri
     'Return a single compact JSON object: {"keep": boolean, "confidence": number, "evidence": string}',
     "where `confidence` is 0..1 and `evidence` cites what you actually observed. Output",
     "ONLY that JSON object.",
+  ].join("\n");
+}
+
+/**
+ * BATCHED adversarial verify prompt: refute EVERY candidate in one turn and return a
+ * JSON ARRAY of verdicts keyed by each finding's stable `fingerprint`. The verifier
+ * does NOT emit findings via any MCP tool — the pipeline parses the returned TEXT and
+ * maps verdicts back to candidates by id. Adversarial framing ("try to refute; keep
+ * only on positive evidence") is preserved; PR title/diff stay fenced as UNTRUSTED.
+ */
+export function buildBatchVerifyPrompt(findings: RawFinding[], ctx: PromptContext): string {
+  const blocks = findings.map((f) =>
+    [
+      `### Candidate ${fingerprint(f)}`,
+      `path: ${f.path}`,
+      `line: ${f.line}${f.endLine ? `-${f.endLine}` : ""}`,
+      `side: ${f.side}`,
+      `severity: ${f.severity}`,
+      `category: ${f.category}`,
+      `title: ${f.title}`,
+      `body: ${f.body}`,
+    ].join("\n"),
+  );
+  return [
+    "You are Warren's adversarial VERIFIER running a BATCHED pass over several proposed",
+    "findings.",
+    SECURITY_PREAMBLE,
+    "",
+    "## Task",
+    "For EACH candidate below, try to REFUTE it using concrete evidence from the code in",
+    "your working directory (read the file, grep callers/callees, run a cheap offline",
+    "check). Keep a candidate ONLY when the concern is genuinely substantiated by positive",
+    "evidence you actually observed; drop it (`keep:false`) if you disprove it OR can find",
+    "no evidence supporting it.",
+    "",
+    "## Working directory",
+    `A checkout at head SHA ${ctx.headSha} (base ${ctx.baseSha}). Inspect the real code`,
+    "before deciding — do NOT trust a candidate's wording on its own.",
+    "",
+    "## PR context",
+    untrusted("PR TITLE", ctx.title),
+    untrusted("DIFF", ctx.diff),
+    "",
+    "## Candidates",
+    ...blocks,
+    "",
+    "## Output protocol",
+    "After investigating, output ONLY a JSON ARRAY of verdicts — exactly one object per",
+    "candidate, identified by the id shown in its `### Candidate <id>` heading:",
+    '`[{ "id": "<candidate id>", "keep": true | false, "confidence": 0..1, "reason": "<what you observed>" }]`',
+    "`confidence` is your 0..1 belief the finding is a real, correct issue. Output NOTHING",
+    "but that JSON array — no prose, no Markdown code fences, no tool calls.",
   ].join("\n");
 }
