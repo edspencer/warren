@@ -52,7 +52,11 @@ const RepoConfigZ = z
  */
 const WarrenConfigRawZ = z.object({
   profile: z.enum(["chill", "assertive"]).default("chill"),
-  min_severity: SeverityZ.default("medium"),
+  // Default `low` so genuine low-severity findings (a narrow race, a resource
+  // inefficiency) surface as findings instead of being self-censored into prose.
+  // Only `nit` is dropped by default; `nit` surfaces under profile=assertive.
+  // Precision is preserved by the adversarial verify pass, not by suppressing severity.
+  min_severity: SeverityZ.default("low"),
   trigger: z
     .object({
       mode: z.enum(["poll", "webhook", "tunnel"]).default("poll"),

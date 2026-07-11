@@ -126,7 +126,10 @@ function renderReport(
       `wall ${(wallMs / 1000).toFixed(1)}s · model ${r.stats.reviewModel}`,
     "",
     `raw=${r.stats.findingsRaw} verified=${r.stats.findingsVerified} ` +
-      `posted=${r.stats.findingsPosted} filesReviewed=${r.stats.filesReviewed}`,
+      `posted=${r.stats.findingsPosted} filesReviewed=${r.stats.filesReviewed} ` +
+      `hunksReviewed=${r.stats.hunksReviewed}`,
+    "",
+    `**Coverage:** ${r.stats.coverage || "_(none)_"}`,
     "",
     "## Summary",
     "",

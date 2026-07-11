@@ -21,6 +21,7 @@ import type {
   ReviewResult,
   ReviewStats,
   ReviewTarget,
+  Severity,
   WarrenConfig,
 } from "../types.js";
 import { targetKey } from "../types.js";
@@ -28,7 +29,7 @@ import type { FleetWrapper } from "../herd/fleet.js";
 import { runAgentTurn } from "../herd/run.js";
 import { reviewerAgentConfig, triageAgentConfig, verifyAgentConfig } from "../herd/reviewer.js";
 import { fingerprint, encodeFindingMarker } from "./fingerprint.js";
-import { gateFindings, meetsSeverity } from "./gate.js";
+import { effectiveMinSeverity, gateFindings, meetsSeverity } from "./gate.js";
 import { buildBatchVerifyPrompt, buildReviewPrompt, buildReviewSystemAppend, buildTriagePrompt, toPromptContext } from "./prompts.js";
 import { createReviewTargetProvider, type MaterializedTarget, type ReviewTargetProvider } from "./target.js";
 
@@ -147,7 +148,6 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
 
     const rawFindings = reviewMcp.collector.getFindings();
     const summary = reviewMcp.collector.getSummary();
-    const walkthrough = reviewMcp.collector.getWalkthrough() || walkthroughSkeleton;
 
     // If the review pass itself failed and produced nothing, do NOT advance state
     // (so the next poll retries) — SPEC §3.8 error rule.
@@ -156,19 +156,40 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
       return noopResult(target, cfg, start, "");
     }
 
+    // Effective severity floor: default `low`; assertive widens to `nit`.
+    const minSev = effectiveMinSeverity(cfg);
+
     // 5. Verify pass — ONE batched turn over the severity-passing candidates only.
-    const toVerify = rawFindings.filter((f) => meetsSeverity(f.severity, cfg.minSeverity));
+    const toVerify = rawFindings.filter((f) => meetsSeverity(f.severity, minSev));
     let survivors: Map<string, { keep: boolean; confidence: number }> | null = null;
     if (verifyEnabled && toVerify.length > 0) {
       survivors = await runVerifyPass(deps, mt, cfg, slug, toVerify);
     }
 
     const candidates: Finding[] = rawFindings.map((rf) =>
-      finalizeFinding(rf, cfg, verifyEnabled, survivors),
+      finalizeFinding(rf, minSev, verifyEnabled, survivors),
     );
 
     // 6. Gate + dedup (drops below-severity, unverified, low-confidence, duplicates).
-    const posted = gateFindings(candidates, cfg.minSeverity, st.postedFingerprints);
+    const posted = gateFindings(candidates, minSev, st.postedFingerprints);
+
+    // Coverage signal: 0 findings should read as "looked, found nothing," not "gave up."
+    const hunkCount = parseDiff(mt.diff).reduce((n, f) => n + f.hunks.length, 0);
+    const coverageLine = buildCoverageLine({
+      files: mt.files.length,
+      hunks: hunkCount,
+      verifyRan: verifyEnabled && toVerify.length > 0,
+      findings: posted.length,
+    });
+
+    // Walkthrough: ALWAYS non-empty. Prefer the agent's walkthrough, fall back to its
+    // summary, then the triage skeleton, then its raw assistant text; append coverage.
+    const walkthroughBody =
+      reviewMcp.collector.getWalkthrough().trim() ||
+      summary.trim() ||
+      walkthroughSkeleton.trim() ||
+      reviewTurn.text.trim();
+    const walkthrough = composeWalkthrough(walkthroughBody, coverageLine);
 
     // 7. Sink: batched GitHub review, or a local markdown report.
     let stickyId: number | null = st.stickyCommentId;
@@ -190,9 +211,11 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
     // 9. Result.
     const stats: ReviewStats = {
       filesReviewed: mt.files.length,
+      hunksReviewed: hunkCount,
       findingsRaw: rawFindings.length,
       findingsVerified: candidates.filter((f) => f.verified).length,
       findingsPosted: posted.length,
+      coverage: coverageLine,
       durationMs: Date.now() - start,
       triageModel: cfg.models.triage,
       reviewModel: cfg.models.review,
@@ -351,7 +374,7 @@ function firstArraySpan(s: string): string | null {
 /** Stamp fingerprint/verified/confidence onto a RawFinding using verify verdicts. */
 function finalizeFinding(
   rf: RawFinding,
-  cfg: WarrenConfig,
+  minSeverity: Severity,
   verifyEnabled: boolean,
   survivors: Map<string, { keep: boolean; confidence: number }> | null,
 ): Finding {
@@ -362,7 +385,7 @@ function finalizeFinding(
   if (!verifyEnabled) {
     verified = true;
     confidence = rf.confidence ?? 0.8;
-  } else if (!meetsSeverity(rf.severity, cfg.minSeverity)) {
+  } else if (!meetsSeverity(rf.severity, minSeverity)) {
     // Below threshold — never verified; gate drops it on severity anyway.
     verified = false;
     confidence = rf.confidence ?? 0;
@@ -499,9 +522,11 @@ function noopResult(target: ReviewTarget, cfg: WarrenConfig, start: number, head
     findings: [],
     stats: {
       filesReviewed: 0,
+      hunksReviewed: 0,
       findingsRaw: 0,
       findingsVerified: 0,
       findingsPosted: 0,
+      coverage: "",
       durationMs: Date.now() - start,
       triageModel: cfg.models.triage,
       reviewModel: cfg.models.review,
@@ -511,6 +536,30 @@ function noopResult(target: ReviewTarget, cfg: WarrenConfig, start: number, head
     sessionId: undefined,
   };
   void headSha;
+}
+
+/**
+ * One-line coverage signal rendered into the walkthrough so a 0-finding review reads
+ * as "looked, found nothing," not "gave up." e.g.
+ * `Reviewed 3 changed files (7 hunks); ran the verify pass; 0 findings.`
+ */
+function buildCoverageLine(opts: {
+  files: number;
+  hunks: number;
+  verifyRan: boolean;
+  findings: number;
+}): string {
+  const f = `${opts.files} changed file${opts.files === 1 ? "" : "s"}`;
+  const h = `${opts.hunks} hunk${opts.hunks === 1 ? "" : "s"}`;
+  const verify = opts.verifyRan ? "; ran the verify pass" : "";
+  const n = `${opts.findings} finding${opts.findings === 1 ? "" : "s"}`;
+  return `Reviewed ${f} (${h})${verify}; ${n}.`;
+}
+
+/** Combine the walkthrough body with the coverage line; always non-empty. */
+function composeWalkthrough(body: string, coverage: string): string {
+  const b = body.trim();
+  return b ? `${b}\n\n${coverage}` : coverage;
 }
 
 function agentSlug(target: ReviewTarget): string {
