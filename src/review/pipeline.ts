@@ -1,0 +1,461 @@
+// src/review/pipeline.ts — the review ORCHESTRATOR (SPEC §3.8).
+//
+// `createReviewPipeline(deps).run(event)` ties every already-built slice into one
+// review: materialize the target → (triage hook) → agentic review pass → batched
+// verify pass → severity/dedup gate → sink (GitHub batched review, or a local
+// markdown report) → persist state. The pipeline is target-agnostic: only the
+// ReviewTargetProvider knows target-kind mechanics, and the review agent's ONLY
+// write path is the injected `github_pr` MCP collector, read here after each turn.
+
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
+import type { GitHubClient, PrFile, ReviewSubmission } from "../github/index.js";
+import { buildSuggestionBlock, mapFindingToHunk, parseDiff } from "../github/index.js";
+import { createGithubPrMcp } from "../mcp/github-pr.js";
+import type { ReviewStateStore } from "../state/store.js";
+import type {
+  Finding,
+  Logger,
+  RawFinding,
+  ReviewEvent,
+  ReviewResult,
+  ReviewStats,
+  ReviewTarget,
+  WarrenConfig,
+} from "../types.js";
+import { targetKey } from "../types.js";
+import type { FleetWrapper } from "../herd/fleet.js";
+import { runAgentTurn } from "../herd/run.js";
+import { reviewerAgentConfig, triageAgentConfig, verifyAgentConfig } from "../herd/reviewer.js";
+import { fingerprint, encodeFindingMarker } from "./fingerprint.js";
+import { gateFindings, meetsSeverity } from "./gate.js";
+import { buildReviewPrompt, buildReviewSystemAppend, buildTriagePrompt, buildVerifyPrompt, toPromptContext } from "./prompts.js";
+import { createReviewTargetProvider, type MaterializedTarget, type ReviewTargetProvider } from "./target.js";
+
+/** The sticky walkthrough marker (SPEC §3.8 step 7). */
+export const WALKTHROUGH_MARKER = "<!-- warren:walkthrough -->";
+
+export interface ReviewPipelineDeps {
+  /** Materializes targets into diff + checkout + file reads. */
+  provider: ReviewTargetProvider;
+  /** Live fleet wrapper used to register + trigger the per-pass agents. */
+  fleet: FleetWrapper;
+  /** Per-(repo,pr) review state (lastReviewedSha, dedup fingerprints, sticky id). */
+  state: ReviewStateStore;
+  /** Resolve the effective WarrenConfig for a target (per-repo overrides applied). */
+  config: (target: ReviewTarget) => WarrenConfig;
+  /** GitHub client for a github-pr target; null/absent for local-git. */
+  clientFor?: (target: ReviewTarget) => GitHubClient | null;
+  /** Root data dir; local-git reviews are written under `${dataDir}/reviews`. */
+  dataDir: string;
+  logger: Logger;
+  /** Run the adversarial verify pass (noise killer). Default true. cfg-gate hook. */
+  verify?: boolean;
+  /** Run the triage pre-pass. Default false for M1 (hook left in place). */
+  triage?: boolean;
+}
+
+export interface ReviewPipeline {
+  run(event: ReviewEvent): Promise<ReviewResult>;
+}
+
+/** Build a pipeline. `deps.provider` may be omitted to build the default provider. */
+export function createReviewPipeline(deps: ReviewPipelineDeps): ReviewPipeline {
+  const provider =
+    deps.provider ??
+    createReviewTargetProvider({
+      dataDir: deps.dataDir,
+      logger: deps.logger,
+      clientFor: deps.clientFor,
+      pathFiltersFor: (t) => deps.config(t).pathFilters,
+    });
+  return { run: (event) => runReview({ ...deps, provider }, event) };
+}
+
+// ─────────────────────────── Orchestration ───────────────────────────
+
+async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<ReviewResult> {
+  const start = Date.now();
+  const target = event.target;
+  const cfg = deps.config(target);
+  const key = targetKey(target);
+  const verifyEnabled = deps.verify ?? true;
+  const st = await deps.state.getPrState(key);
+
+  // 1. Paused/ignored guard (explicit commands override).
+  if ((st.paused || st.ignored) && event.reason !== "command") {
+    deps.logger.info(`pipeline: ${key} is ${st.paused ? "paused" : "ignored"}; skipping.`);
+    return noopResult(target, cfg, start, "");
+  }
+
+  // 2. Materialize (incremental unless full / brand-new).
+  const mt = await deps.provider.materialize(target, {
+    full: event.full,
+    sinceSha: event.full ? "" : st.lastReviewedSha,
+  });
+
+  try {
+    if (mt.files.length === 0) {
+      deps.logger.info(`pipeline: ${key} has no changed files; advancing lastReviewedSha.`);
+      await deps.state.setPrState(key, (s) => ({
+        ...s,
+        lastReviewedSha: mt.headSha || s.lastReviewedSha,
+      }));
+      return noopResult(target, cfg, start, mt.headSha);
+    }
+
+    const ctx = toPromptContext(mt, cfg);
+    const slug = agentSlug(target);
+    const client = deps.clientFor?.(target) ?? null;
+
+    // 3. Triage pass — HOOK. Skipped in M1 unless explicitly enabled (token-thrifty).
+    let walkthroughSkeleton = "";
+    if (deps.triage) {
+      const triageName = `triage-${slug}`;
+      await deps.fleet.addReviewAgent(
+        triageAgentConfig({ name: triageName, workingDir: mt.checkoutDir, model: cfg.models.triage }),
+      );
+      const { text } = await runAgentTurn({
+        fleet: deps.fleet,
+        agentName: triageName,
+        prompt: buildTriagePrompt(ctx),
+        logger: deps.logger,
+      });
+      walkthroughSkeleton = text;
+    }
+
+    // 4. Review pass (agentic; findings come back via the github_pr MCP collector).
+    const reviewerName = `reviewer-${slug}`;
+    await deps.fleet.addReviewAgent(
+      reviewerAgentConfig({ name: reviewerName, workingDir: mt.checkoutDir, model: cfg.models.review }),
+    );
+    const reviewMcp = createGithubPrMcp({
+      client,
+      target,
+      logger: deps.logger,
+      lastReviewedSha: st.lastReviewedSha,
+      existingFindings: [],
+    });
+    const reviewTurn = await runAgentTurn({
+      fleet: deps.fleet,
+      agentName: reviewerName,
+      prompt: buildReviewPrompt(ctx),
+      systemPromptAppend: buildReviewSystemAppend(cfg),
+      injectedMcpServers: { github_pr: reviewMcp.def },
+      logger: deps.logger,
+    });
+
+    const rawFindings = reviewMcp.collector.getFindings();
+    const summary = reviewMcp.collector.getSummary();
+    const walkthrough = reviewMcp.collector.getWalkthrough() || walkthroughSkeleton;
+
+    // If the review pass itself failed and produced nothing, do NOT advance state
+    // (so the next poll retries) — SPEC §3.8 error rule.
+    if (!reviewTurn.result.success && rawFindings.length === 0) {
+      deps.logger.warn(`pipeline: review pass failed for ${key}; not advancing state.`);
+      return noopResult(target, cfg, start, "");
+    }
+
+    // 5. Verify pass — ONE batched turn over the severity-passing candidates only.
+    const toVerify = rawFindings.filter((f) => meetsSeverity(f.severity, cfg.minSeverity));
+    let survivors: Map<string, { keep: boolean; confidence: number }> | null = null;
+    if (verifyEnabled && toVerify.length > 0) {
+      survivors = await runVerifyPass(deps, target, mt, cfg, slug, client, toVerify);
+    }
+
+    const candidates: Finding[] = rawFindings.map((rf) =>
+      finalizeFinding(rf, cfg, verifyEnabled, survivors),
+    );
+
+    // 6. Gate + dedup (drops below-severity, unverified, low-confidence, duplicates).
+    const posted = gateFindings(candidates, cfg.minSeverity, st.postedFingerprints);
+
+    // 7. Sink: batched GitHub review, or a local markdown report.
+    let stickyId: number | null = st.stickyCommentId;
+    if (client && target.kind === "github-pr") {
+      stickyId = await sinkToGithub(deps, client, target, mt, summary, walkthrough, posted, st.stickyCommentId);
+    } else {
+      await sinkToLocalReport(deps, target, key, mt, summary, walkthrough, posted);
+    }
+
+    // 8. Persist state.
+    const newFps = posted.map((f) => f.fingerprint);
+    await deps.state.setPrState(key, (s) => ({
+      ...s,
+      lastReviewedSha: mt.headSha || s.lastReviewedSha,
+      stickyCommentId: stickyId ?? s.stickyCommentId,
+      postedFingerprints: dedupe([...s.postedFingerprints, ...newFps]),
+    }));
+
+    // 9. Result.
+    const stats: ReviewStats = {
+      filesReviewed: mt.files.length,
+      findingsRaw: rawFindings.length,
+      findingsVerified: candidates.filter((f) => f.verified).length,
+      findingsPosted: posted.length,
+      durationMs: Date.now() - start,
+      triageModel: cfg.models.triage,
+      reviewModel: cfg.models.review,
+      verifyModel: cfg.models.verify,
+    };
+    return {
+      target,
+      summary,
+      walkthrough,
+      findings: posted,
+      stats,
+      posted: posted.length > 0,
+      sessionId: reviewTurn.result.success ? reviewTurn.result.sessionId : undefined,
+    };
+  } finally {
+    await mt.dispose().catch(() => {});
+  }
+}
+
+// ─────────────────────────── Verify pass ───────────────────────────
+
+/**
+ * ONE batched verify turn: a verify agent inspects every candidate and RE-SUBMITS
+ * (via its own github_pr collector) the findings that survive refutation. We match
+ * survivors back to candidates by fingerprint. Token-thrifty vs one turn per finding.
+ */
+async function runVerifyPass(
+  deps: ReviewPipelineDeps,
+  target: ReviewTarget,
+  mt: MaterializedTarget,
+  cfg: WarrenConfig,
+  slug: string,
+  client: GitHubClient | null,
+  findings: RawFinding[],
+): Promise<Map<string, { keep: boolean; confidence: number }>> {
+  const verifyName = `verify-${slug}`;
+  await deps.fleet.addReviewAgent(
+    verifyAgentConfig({ name: verifyName, workingDir: mt.checkoutDir, model: cfg.models.verify }),
+  );
+  const verifyMcp = createGithubPrMcp({
+    client,
+    target,
+    logger: deps.logger,
+    existingFindings: findings,
+  });
+  await runAgentTurn({
+    fleet: deps.fleet,
+    agentName: verifyName,
+    prompt: buildBatchVerifyPrompt(findings, mt, cfg),
+    injectedMcpServers: { github_pr: verifyMcp.def },
+    logger: deps.logger,
+  });
+
+  const survivors = new Map<string, { keep: boolean; confidence: number }>();
+  for (const sf of verifyMcp.collector.getFindings()) {
+    survivors.set(fingerprint(sf), { keep: true, confidence: sf.confidence ?? 0.8 });
+  }
+  return survivors;
+}
+
+/**
+ * Compose a single batched verify prompt from the per-finding adversarial prompt
+ * (prompts.ts) plus one instruction: re-submit ONLY the survivors via the github_pr
+ * MCP so the pipeline can read them back. Built here (not prompts.ts) to avoid
+ * editing another slice; each finding block reuses `buildVerifyPrompt`.
+ */
+function buildBatchVerifyPrompt(findings: RawFinding[], mt: MaterializedTarget, cfg: WarrenConfig): string {
+  const ctx = toPromptContext(mt, cfg);
+  const blocks = findings.map((f, i) => `### Candidate ${i + 1}\n${buildVerifyPrompt(f, ctx)}`);
+  return [
+    "You are Warren's adversarial VERIFIER running a BATCHED pass over several proposed",
+    "findings. For EACH candidate below, try to refute it with concrete evidence from the",
+    "checkout in your working directory.",
+    "",
+    "## Output protocol",
+    "Call `mcp__github_pr__submit_finding` ONCE for every candidate that SURVIVES refutation",
+    "(the concern is genuinely substantiated), copying its `path`, `line`, `side`, `severity`,",
+    "`category`, `title`, and `body` VERBATIM and setting `confidence` to your 0..1 belief.",
+    "Do NOT submit candidates you refuted or could not substantiate. Then call",
+    "`mcp__github_pr__submit_review` once with a one-line summary of the verification.",
+    "",
+    ...blocks,
+  ].join("\n");
+}
+
+// ─────────────────────────── Finding finalization ───────────────────────────
+
+/** Stamp fingerprint/verified/confidence onto a RawFinding using verify verdicts. */
+function finalizeFinding(
+  rf: RawFinding,
+  cfg: WarrenConfig,
+  verifyEnabled: boolean,
+  survivors: Map<string, { keep: boolean; confidence: number }> | null,
+): Finding {
+  const fp = fingerprint(rf);
+  let verified: boolean;
+  let confidence: number;
+
+  if (!verifyEnabled) {
+    verified = true;
+    confidence = rf.confidence ?? 0.8;
+  } else if (!meetsSeverity(rf.severity, cfg.minSeverity)) {
+    // Below threshold — never verified; gate drops it on severity anyway.
+    verified = false;
+    confidence = rf.confidence ?? 0;
+  } else {
+    const v = survivors?.get(fp);
+    verified = v?.keep ?? false;
+    confidence = v?.confidence ?? rf.confidence ?? 0;
+  }
+
+  return { ...rf, confidence, fingerprint: fp, verified };
+}
+
+// ─────────────────────────── Sinks ───────────────────────────
+
+/** Build one batched GitHub review + upsert the sticky walkthrough. Returns sticky id. */
+async function sinkToGithub(
+  deps: ReviewPipelineDeps,
+  client: GitHubClient,
+  target: Extract<ReviewTarget, { kind: "github-pr" }>,
+  mt: MaterializedTarget,
+  summary: string,
+  walkthrough: string,
+  posted: Finding[],
+  knownStickyId: number | null,
+): Promise<number | null> {
+  const hunks = parseDiff(mt.diff);
+  const comments: ReviewSubmission["comments"] = [];
+  for (const f of posted) {
+    const mapped = mapFindingToHunk({ path: f.path, line: f.line, endLine: f.endLine, side: f.side }, hunks);
+    if (!mapped) {
+      deps.logger.debug(`pipeline: dropping off-diff finding ${f.path}:${f.line}`);
+      continue;
+    }
+    comments.push({
+      path: f.path,
+      body: commentBody(f),
+      line: mapped.line,
+      side: mapped.side,
+      ...(mapped.startLine != null ? { startLine: mapped.startLine, startSide: mapped.startSide } : {}),
+    });
+  }
+
+  const review: ReviewSubmission = {
+    commitId: mt.headSha,
+    body: summary || "Warren review.",
+    event: "COMMENT",
+    comments,
+  };
+  const outcome = await client.createReview(target.repo, target.prNumber, review);
+  deps.logger.info(`pipeline: review ${outcome.dryRun ? "captured (dry-run)" : "posted"} (${comments.length} comments).`);
+
+  let stickyId = knownStickyId;
+  if (walkthrough) {
+    const sticky = await client.upsertStickyComment(
+      target.repo,
+      target.prNumber,
+      WALKTHROUGH_MARKER,
+      walkthrough,
+      knownStickyId,
+    );
+    if (typeof sticky.ref === "number") stickyId = sticky.ref;
+  }
+  return stickyId;
+}
+
+/** Render + write a local markdown review report; returns the file path. */
+async function sinkToLocalReport(
+  deps: ReviewPipelineDeps,
+  target: ReviewTarget,
+  key: string,
+  mt: MaterializedTarget,
+  summary: string,
+  walkthrough: string,
+  posted: Finding[],
+): Promise<string> {
+  const dir = path.join(deps.dataDir, "reviews");
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, `${sanitize(key)}-${mt.headSha || "head"}.md`);
+  await fs.writeFile(file, renderReport(target, mt, summary, walkthrough, posted), "utf8");
+  deps.logger.info(`pipeline: wrote local review report → ${file}`);
+  return file;
+}
+
+function renderReport(
+  target: ReviewTarget,
+  mt: MaterializedTarget,
+  summary: string,
+  walkthrough: string,
+  posted: Finding[],
+): string {
+  const lines: string[] = [
+    `# Warren review — ${targetKey(target)}`,
+    "",
+    `head: \`${mt.headSha}\`  base: \`${mt.baseSha}\``,
+    "",
+    "## Summary",
+    summary || "_(none)_",
+  ];
+  if (walkthrough) lines.push("", "## Walkthrough", walkthrough);
+  lines.push("", `## Findings (${posted.length})`);
+  if (posted.length === 0) {
+    lines.push("_(no findings after gate)_");
+  } else {
+    for (const f of posted) {
+      lines.push(
+        "",
+        `### ${f.severity.toUpperCase()} · ${f.category} — ${f.title}`,
+        `\`${f.path}:${f.line}${f.endLine ? `-${f.endLine}` : ""}\` (${f.side}) · confidence ${f.confidence.toFixed(2)}`,
+        "",
+        f.body,
+      );
+      if (f.suggestion) lines.push("", buildSuggestionBlock(f.suggestion));
+      lines.push("", encodeFindingMarker(f.fingerprint));
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** Comment body for a posted GitHub review comment: prose + suggestion + hidden marker. */
+function commentBody(f: Finding): string {
+  const parts = [`**${f.severity.toUpperCase()} · ${f.category}** — ${f.title}`, "", f.body];
+  if (f.suggestion) parts.push("", buildSuggestionBlock(f.suggestion));
+  parts.push("", encodeFindingMarker(f.fingerprint));
+  return parts.join("\n");
+}
+
+// ─────────────────────────── Helpers ───────────────────────────
+
+function noopResult(target: ReviewTarget, cfg: WarrenConfig, start: number, headSha: string): ReviewResult {
+  return {
+    target,
+    summary: "",
+    walkthrough: "",
+    findings: [],
+    stats: {
+      filesReviewed: 0,
+      findingsRaw: 0,
+      findingsVerified: 0,
+      findingsPosted: 0,
+      durationMs: Date.now() - start,
+      triageModel: cfg.models.triage,
+      reviewModel: cfg.models.review,
+      verifyModel: cfg.models.verify,
+    },
+    posted: false,
+    sessionId: undefined,
+  };
+  void headSha;
+}
+
+function agentSlug(target: ReviewTarget): string {
+  return sanitize(targetKey(target)).slice(0, 48).toLowerCase() || "target";
+}
+
+function sanitize(key: string): string {
+  return key.replace(/[^a-zA-Z0-9]+/g, "_");
+}
+
+function dedupe(items: string[]): string[] {
+  return [...new Set(items)];
+}
+
+// Re-export the seam types so callers can import them from the pipeline module.
+export type { MaterializedTarget, PrFile };
