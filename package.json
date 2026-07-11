@@ -9,8 +9,9 @@
   },
   "scripts": {
     "build": "tsc",
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
+    "review:local": "tsx src/index.ts review-local",
     "test": "vitest run"
   },
   "dependencies": {
