@@ -182,13 +182,16 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
       findings: posted.length,
     });
 
-    // Walkthrough: ALWAYS non-empty. Prefer the agent's walkthrough, fall back to its
-    // summary, then the triage skeleton, then its raw assistant text; append coverage.
+    // Walkthrough: ALWAYS non-empty, but NEVER a mere copy of the summary (warren#1).
+    // Prefer the agent's distinct walkthrough, then the triage skeleton; only fall back
+    // to raw assistant text when there's no summary to carry the prose. We deliberately
+    // do NOT fall back to `summary` here — the coverage line (appended below) keeps the
+    // walkthrough non-empty, so a summary-only review renders its prose once (in Summary)
+    // and a distinct coverage signal in Walkthrough, rather than the same paragraph twice.
     const walkthroughBody =
       reviewMcp.collector.getWalkthrough().trim() ||
-      summary.trim() ||
       walkthroughSkeleton.trim() ||
-      reviewTurn.text.trim();
+      (summary.trim() ? "" : reviewTurn.text.trim());
     const walkthrough = composeWalkthrough(walkthroughBody, coverageLine);
 
     // 7. Sink: batched GitHub review, or a local markdown report.

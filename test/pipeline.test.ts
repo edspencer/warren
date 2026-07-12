@@ -333,4 +333,37 @@ describe("recall + coverage + walkthrough (default low config)", () => {
     expect(report).toContain("0 findings");
     await rm(dd, { recursive: true, force: true });
   });
+
+  it("does not duplicate the summary prose into the walkthrough (warren#1)", async () => {
+    const { dd, state } = await freshDeps();
+    const provider = createReviewTargetProvider({ dataDir: dd, pathFilters: [] });
+    const summary = "Read both changed files; confirmed the invariant holds. No issues.";
+    const pipeline = createReviewPipeline({
+      provider,
+      // Agent supplies a summary but NO distinct walkthrough — the case that used to
+      // copy the summary into the walkthrough and render it twice.
+      fleet: fakeFleetWith({ summary, findings: [] }, []),
+      state,
+      config: () => ({ ...makeConfig(), minSeverity: "low" as const }),
+      dataDir: dd,
+      logger: silentLogger,
+    });
+    const result = await pipeline.run({
+      target: cleanTarget(),
+      reason: "manual",
+      full: true,
+      receivedAt: new Date().toISOString(),
+    });
+
+    // Walkthrough is still non-empty (coverage line) but is NOT the summary prose.
+    expect(result.walkthrough.trim().length).toBeGreaterThan(0);
+    expect(result.walkthrough).not.toContain(summary);
+    // The rendered report keeps both headers, but the summary paragraph appears once.
+    const files = await readdir(join(dd, "reviews"));
+    const report = await readFile(join(dd, "reviews", files[0]), "utf8");
+    expect(report).toContain("## Summary");
+    expect(report).toContain("## Walkthrough");
+    expect(report.split(summary).length - 1).toBe(1);
+    await rm(dd, { recursive: true, force: true });
+  });
 });
