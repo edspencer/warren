@@ -67,6 +67,7 @@ function config(over: Partial<WarrenConfig> = {}): WarrenConfig {
     walkthrough: { sequenceDiagrams: false, poem: false },
     commandsAllowed: ["review", "full_review", "pause", "resume", "resolve", "help"],
     models: { triage: "h", review: "o", verify: "h" },
+    resolveOnFix: true,
     live: false,
     repos: [{ github: { owner: "acme", name: "widgets" } }],
     concurrency: 2,

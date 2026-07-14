@@ -93,6 +93,7 @@ function makeConfig(): WarrenConfig {
     walkthrough: { sequenceDiagrams: false, poem: false },
     commandsAllowed: ["review"],
     models: { triage: "haiku", review: "opus", verify: "haiku" },
+    resolveOnFix: true,
     live: false,
     repos: [],
     concurrency: 1,

@@ -169,6 +169,9 @@ export interface WarrenConfig {
   walkthrough: { sequenceDiagrams: boolean; poem: boolean };
   commandsAllowed: WarrenCommandKind[];
   models: { triage: string; review: string; verify: string };
+  // On re-review, auto-resolve the GitHub review thread of a previously-posted
+  // finding the author has since fixed (no longer detected). Default true.
+  resolveOnFix: boolean;
   live: boolean; // resolved: WARREN_LIVE OR config; false = dry-run
   repos: RepoConfig[]; // watched repos (server-level config)
   concurrency: number; // max parallel reviews (JobQueue)

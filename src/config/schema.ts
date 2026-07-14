@@ -95,6 +95,8 @@ const WarrenConfigRawZ = z.object({
       verify: z.string().default("claude-haiku-4-5-20251001"),
     })
     .default({}),
+  // Auto-resolve a fixed finding's review thread on re-review. Default true.
+  resolve_on_fix: z.boolean().default(true),
   live: z.boolean().default(false), // env WARREN_LIVE overrides in load.ts
   concurrency: z.number().int().positive().default(3),
   repos: z.array(RepoConfigZ).default([]),
@@ -178,6 +180,7 @@ export function toWarrenConfig(raw: WarrenConfigRaw): WarrenConfig {
       review: raw.models.review,
       verify: raw.models.verify,
     },
+    resolveOnFix: raw.resolve_on_fix,
     live: raw.live,
     concurrency: raw.concurrency,
     repos: raw.repos.map(mapRepo),
