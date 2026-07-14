@@ -1,0 +1,83 @@
+# .warren.example.yaml — Warren server configuration.
+#
+# Copy to `.warren.yaml` in the directory you run Warren from. EVERY key is
+# optional: an empty file (or no file at all) uses the defaults shown below.
+# Keys are snake_case on disk. Secrets and the watched-repo list come from the
+# environment (see .env.example / the README), NOT this file.
+
+# Review persona. `chill` (default) keeps the bar high; `assertive` also surfaces
+# `nit`-level findings.
+profile: chill
+
+# Lowest severity that can be POSTED. One of: critical | high | medium | low | nit.
+# Default `low` — genuine low-severity findings surface; only `nit` is dropped
+# (unless profile=assertive). Precision comes from the verify pass, not from
+# raising this floor.
+min_severity: low
+
+# How Warren discovers work to review.
+trigger:
+  # poll (default) is OUTBOUND-ONLY — it needs no public ingress and works behind
+  # any homelab firewall/NAT. `webhook` and `tunnel` are roadmap (stubbed today).
+  mode: poll
+  # Poll cadence. Accepts "30s", "5m", "1h", or a raw millisecond number.
+  poll_interval: 60s
+  # webhook/tunnel only (roadmap): env var holding the shared secret / public URL.
+  # secret_env: WARREN_WEBHOOK_SECRET
+  # public_url: https://warren.example.com
+
+# Automatic review of open PRs (in addition to on-demand @warren commands).
+auto_review:
+  enabled: true
+  drafts: false          # also review draft PRs
+  base_branches: [main]  # only auto-review PRs targeting these base branches
+
+# Glob filters applied to changed files. `!` negates (exclude). Defaults exclude
+# build output, lockfiles, and vendored deps.
+path_filters:
+  - "!**/dist/**"
+  - "!**/*.lock"
+  - "!**/node_modules/**"
+
+# Extra, path-scoped instructions handed to the review agent for matching files.
+path_instructions: []
+#   - path: "src/api/**"
+#     instructions: "Flag any endpoint that lacks an authorization check."
+
+# Sticky walkthrough extras (off by default — keeps the walkthrough tight).
+walkthrough:
+  sequence_diagrams: false
+  poem: false
+
+# Which @warren PR commands are honored.
+commands_allowed: [review, full_review, pause, resume, resolve, help, ask]
+
+# Models per pipeline stage. Triage + verify use a fast model; review uses Opus.
+models:
+  triage: claude-haiku-4-5-20251001
+  review: claude-opus-4-8
+  verify: claude-haiku-4-5-20251001
+
+# On re-review, auto-resolve the GitHub thread of a finding the author has fixed.
+resolve_on_fix: true
+
+# Post for real. Default false (dry-run: reads GitHub, captures would-be writes to
+# disk, never posts). The WARREN_LIVE env var overrides this when set.
+live: false
+
+# Max concurrent review jobs across all watched repos.
+concurrency: 3
+
+# Optional: pin watched repos here instead of (or in addition to) WARREN_REPOS.
+# Each entry is EXACTLY ONE of `github:` or `local_git:`, with optional per-repo
+# `overrides:` (same keys as above, snake_case).
+repos: []
+#   - github: { owner: edspencer, name: warren }
+#     overrides:
+#       profile: assertive
+#       min_severity: medium
+#   - local_git:
+#       repo_dir: /srv/repos/myapp
+#       base_ref: main
+#       head_ref: feature-branch
+#       label: myapp-feature
