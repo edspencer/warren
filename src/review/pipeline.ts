@@ -13,6 +13,7 @@ import type { GitHubClient, PrFile, ReviewSubmission } from "../github/index.js"
 import { buildSuggestionBlock, mapFindingToHunk, parseDiff } from "../github/index.js";
 import { createGithubPrMcp } from "../mcp/github-pr.js";
 import type { ReviewStateStore } from "../state/store.js";
+import type { ReviewHistoryStore } from "../state/history.js";
 import type {
   Finding,
   Logger,
@@ -43,6 +44,8 @@ export interface ReviewPipelineDeps {
   fleet: FleetWrapper;
   /** Per-(repo,pr) review state (lastReviewedSha, dedup fingerprints, sticky id). */
   state: ReviewStateStore;
+  /** Append-only review history (dashboard). Optional; skipped when absent. */
+  history?: ReviewHistoryStore;
   /** Resolve the effective WarrenConfig for a target (per-repo overrides applied). */
   config: (target: ReviewTarget) => WarrenConfig;
   /** GitHub client for a github-pr target; null/absent for local-git. */
@@ -253,7 +256,7 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
       reviewModel: cfg.models.review,
       verifyModel: cfg.models.verify,
     };
-    return {
+    const result: ReviewResult = {
       target,
       summary,
       walkthrough,
@@ -262,6 +265,20 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
       posted: posted.length > 0,
       sessionId: reviewTurn.result.success ? reviewTurn.result.sessionId : undefined,
     };
+
+    // 10. Append to review history (dashboard). Best-effort: the store never
+    // throws, but guard anyway so a history hiccup can't fail a real review.
+    if (deps.history) {
+      await deps.history.append(result).catch((err) => {
+        deps.logger.warn(
+          `pipeline: failed to append review history for ${key}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    }
+
+    return result;
   } finally {
     await mt.dispose().catch(() => {});
   }

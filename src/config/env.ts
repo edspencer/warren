@@ -19,6 +19,26 @@ export interface WarrenEnv {
   repos: string[];
   /** Base directory for JSON state + captured dry-run write payloads. */
   dataDir: string;
+  /** Dashboard/API authentication (installer-configured; mirrors Paddock). */
+  auth: WarrenAuthConfig;
+}
+
+/**
+ * Dashboard/API auth config. Mirrors Paddock's `PADDOCK_AUTH_*` mode-select
+ * (see paddock server auth.ts): an installer picks `none` (open, default) or
+ * `jwt` (require a signed `Authorization: Bearer <jwt>`). Warren verifies with
+ * the same library (`jose`) and validates `iss`/`aud`/`exp` like Paddock; it
+ * uses a shared HS256 secret (`WARREN_JWT_SECRET`) rather than a remote JWKS so
+ * a small self-hosted deploy needs no IdP. The secret is NEVER logged.
+ */
+export interface WarrenAuthConfig {
+  mode: "none" | "jwt";
+  /** jwt: HS256 shared secret used to verify the token signature. Secret. */
+  jwtSecret?: string;
+  /** jwt: expected `iss` claim (validated when set). */
+  jwtIssuer?: string;
+  /** jwt: expected `aud` claim (validated when set). */
+  jwtAudience?: string;
 }
 
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
@@ -40,6 +60,7 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): WarrenEnv {
   const runtime = (source.WARREN_RUNTIME ?? "cli").trim().toLowerCase();
   const portRaw = source.WARREN_PORT ?? source.PORT;
   const port = portRaw ? Number.parseInt(portRaw, 10) : 5000;
+  const authMode = (source.WARREN_AUTH_MODE ?? "none").trim().toLowerCase();
   return {
     githubToken: source.GITHUB_TOKEN || undefined,
     anthropicApiKey: source.ANTHROPIC_API_KEY || undefined,
@@ -49,6 +70,12 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): WarrenEnv {
     host: source.HOST || source.WARREN_HOST || "0.0.0.0",
     repos: csv(source.WARREN_REPOS),
     dataDir: source.WARREN_DATA_DIR || "./data",
+    auth: {
+      mode: authMode === "jwt" ? "jwt" : "none",
+      jwtSecret: source.WARREN_JWT_SECRET || undefined,
+      jwtIssuer: source.WARREN_JWT_ISSUER || undefined,
+      jwtAudience: source.WARREN_JWT_AUDIENCE || undefined,
+    },
   };
 }
 
@@ -66,5 +93,9 @@ export function redactedEnv(env: WarrenEnv): Record<string, unknown> {
     host: env.host,
     repos: env.repos,
     dataDir: env.dataDir,
+    authMode: env.auth.mode,
+    hasJwtSecret: !!env.auth.jwtSecret,
+    hasJwtIssuer: !!env.auth.jwtIssuer,
+    hasJwtAudience: !!env.auth.jwtAudience,
   };
 }

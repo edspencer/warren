@@ -9,6 +9,7 @@ import path from "node:path";
 import { readEnv, type WarrenEnv } from "./config/env.js";
 import { loadWarrenConfig, resolveRepoConfig } from "./config/load.js";
 import { createReviewStateStore, type ReviewStateStore } from "./state/store.js";
+import { createReviewHistoryStore, type ReviewHistoryStore } from "./state/history.js";
 import { createGitHubClient, type GitHubClient } from "./github/client.js";
 import {
   createReviewTargetProvider,
@@ -40,6 +41,8 @@ export interface WarrenApp {
   trigger: TriggerSource;
   fleet: FleetWrapper;
   state: ReviewStateStore;
+  /** Append-only review history powering the dashboard API. */
+  history: ReviewHistoryStore;
   provider: ReviewTargetProvider;
   config: WarrenConfig;
   env: WarrenEnv;
@@ -117,8 +120,9 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
     return match ? resolveRepoConfig(config, match) : config;
   };
 
-  // State store.
+  // State store + append-only review history (dashboard).
   const state = createReviewStateStore(dataDir);
+  const history = createReviewHistoryStore(dataDir);
 
   // GitHub client factory: one shared client per token (reads identical regardless of
   // key); WARREN_LIVE selects live vs dry-run. null for local-git targets.
@@ -153,6 +157,7 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
     provider,
     fleet,
     state,
+    history,
     config: configFor,
     clientFor,
     dataDir,
@@ -214,6 +219,7 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
     trigger,
     fleet,
     state,
+    history,
     provider,
     config,
     env,
