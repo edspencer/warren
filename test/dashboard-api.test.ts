@@ -1,0 +1,120 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { createServer } from "../src/server/app.js";
+import { ghResult, makeFakeApp, makeFinding } from "./fake-app.js";
+
+let dataDir: string;
+
+beforeEach(async () => {
+  dataDir = await mkdtemp(join(tmpdir(), "warren-api-"));
+});
+afterEach(async () => {
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+describe("dashboard API", () => {
+  it("GET /api/auth-mode reports the mode (unauthenticated)", async () => {
+    const { app } = makeFakeApp({ dataDir, auth: { mode: "none" } });
+    const server = createServer(app);
+    const res = await server.inject({ method: "GET", url: "/api/auth-mode" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ mode: "none" });
+    await server.close();
+  });
+
+  it("GET / serves the dashboard HTML", async () => {
+    const { app } = makeFakeApp({ dataDir });
+    const server = createServer(app);
+    const res = await server.inject({ method: "GET", url: "/" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    expect(res.body).toContain("Warren");
+    await server.close();
+  });
+
+  it("GET /api/overview aggregates severity counts, totals, and a time series", async () => {
+    const { app, history } = makeFakeApp({ dataDir });
+    await history.append(
+      ghResult({ pr: 1, findings: [makeFinding({ severity: "critical" }), makeFinding({ severity: "low" })] }),
+    );
+    await history.append(ghResult({ pr: 2, findings: [makeFinding({ severity: "critical" })] }));
+    const server = createServer(app);
+    const res = await server.inject({ method: "GET", url: "/api/overview" });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.totalReviews).toBe(2);
+    expect(body.totalFindings.total).toBe(3);
+    expect(body.totalFindings.bySeverity.critical).toBe(2);
+    expect(body.totalFindings.bySeverity.low).toBe(1);
+    expect(body.watchedRepos).toBe(1);
+    expect(Array.isArray(body.reviewsOverTime)).toBe(true);
+    expect(body.reviewsOverTime.reduce((n: number, d: { count: number }) => n + d.count, 0)).toBe(2);
+    expect(body.meanWallMs).toBe(3000);
+    await server.close();
+  });
+
+  it("GET /api/repos lists watched repos (incl. zero-review) + per-repo counts", async () => {
+    const { app, history } = makeFakeApp({
+      dataDir,
+      repos: [
+        { github: { owner: "acme", name: "widgets" } },
+        { github: { owner: "acme", name: "unused" } },
+      ],
+    });
+    await history.append(ghResult({ owner: "acme", name: "widgets", pr: 1 }));
+    await history.append(ghResult({ owner: "acme", name: "widgets", pr: 2 }));
+    const server = createServer(app);
+    const res = await server.inject({ method: "GET", url: "/api/repos" });
+    expect(res.statusCode).toBe(200);
+    const repos = res.json().repos as Array<{ repo: string; reviewCount: number; watched: boolean; lastReviewAt: string | null }>;
+    const widgets = repos.find((r) => r.repo === "acme/widgets")!;
+    const unused = repos.find((r) => r.repo === "acme/unused")!;
+    expect(widgets.reviewCount).toBe(2);
+    expect(widgets.lastReviewAt).not.toBeNull();
+    expect(unused.reviewCount).toBe(0);
+    expect(unused.watched).toBe(true);
+    await server.close();
+  });
+
+  it("GET /api/reviews returns paginated summaries; supports repo + pr filters", async () => {
+    const { app, history } = makeFakeApp({ dataDir });
+    await history.append(ghResult({ owner: "acme", name: "a", pr: 1 }));
+    await history.append(ghResult({ owner: "acme", name: "b", pr: 2 }));
+    await history.append(ghResult({ owner: "acme", name: "b", pr: 3 }));
+    const server = createServer(app);
+
+    const all = await server.inject({ method: "GET", url: "/api/reviews" });
+    expect(all.json().total).toBe(3);
+
+    const byRepo = await server.inject({ method: "GET", url: "/api/reviews?repo=acme/b" });
+    expect(byRepo.json().total).toBe(2);
+
+    const byPr = await server.inject({ method: "GET", url: "/api/reviews?pr=3" });
+    expect(byPr.json().total).toBe(1);
+    expect(byPr.json().records[0].prNumber).toBe(3);
+
+    const paged = await server.inject({ method: "GET", url: "/api/reviews?limit=1&offset=1" });
+    expect(paged.json().records).toHaveLength(1);
+    expect(paged.json().total).toBe(3);
+    await server.close();
+  });
+
+  it("GET /api/reviews/:id returns the full record; 404 for unknown id", async () => {
+    const { app, history } = makeFakeApp({ dataDir });
+    const rec = await history.append(ghResult({ pr: 5 }));
+    const server = createServer(app);
+
+    const ok = await server.inject({ method: "GET", url: "/api/reviews/" + rec!.id });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().prNumber).toBe(5);
+    expect(ok.json().walkthrough).toBe("walkthrough");
+    expect(Array.isArray(ok.json().findings)).toBe(true);
+
+    const miss = await server.inject({ method: "GET", url: "/api/reviews/does-not-exist" });
+    expect(miss.statusCode).toBe(404);
+    await server.close();
+  });
+});
