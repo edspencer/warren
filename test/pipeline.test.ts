@@ -207,3 +207,163 @@ describe("createReviewPipeline (offline, fake fleet + local-git)", () => {
     expect(report).toContain(result.findings[0].fingerprint);
   });
 });
+
+// ─────────────────────────── Recall + coverage + walkthrough ───────────────────────────
+//
+// A configurable fake fleet: the reviewer submits `review`, the verifier returns
+// `verdicts` (as JSON text). Lets each test drive a specific findings/verdict shape.
+
+function fakeFleetWith(
+  review: { summary: string; walkthrough?: string; findings: unknown[] },
+  verdicts: Array<{ id: string; keep: boolean; confidence: number }>,
+): FleetWrapper {
+  let n = 0;
+  const ok = (agentName: string): TriggerResult => ({
+    jobId: `job-${++n}`,
+    agentName,
+    scheduleName: null,
+    startedAt: new Date().toISOString(),
+    success: true,
+    sessionId: `sess-${n}`,
+  });
+  return {
+    fleet: {} as never,
+    async addReviewAgent() {
+      return { name: "fake" } as never;
+    },
+    async trigger(agentName, opts) {
+      if (agentName.startsWith("reviewer-")) {
+        await callTool(opts.injectedMcpServers, "submit_review", review as Record<string, unknown>);
+      } else if (agentName.startsWith("verify-")) {
+        emitText(opts, JSON.stringify(verdicts));
+      }
+      return ok(agentName);
+    },
+    async cancel() {},
+    async stop() {},
+  };
+}
+
+describe("recall + coverage + walkthrough (default low config)", () => {
+  const LOW_RACE = {
+    path: "src/new.ts",
+    line: 1,
+    side: "RIGHT" as const,
+    severity: "low",
+    category: "correctness",
+    title: "Narrow last-writer-wins race on the cached value",
+    body: "Two concurrent callers can clobber the cached export; low impact but real.",
+  };
+
+  async function freshDeps() {
+    const dd = await mkdtemp(join(tmpdir(), "warren-pipe-data-"));
+    const state = (await import("../src/state/store.js")).createReviewStateStore(dd);
+    return { dd, state };
+  }
+
+  const lowTarget = (): LocalGitTarget => ({ ...target(), label: "local:low" });
+  const cleanTarget = (): LocalGitTarget => ({ ...target(), label: "local:clean" });
+
+  it("surfaces a VERIFIED low finding at the default (low) gate, with a populated walkthrough + coverage", async () => {
+    const { dd, state } = await freshDeps();
+    const provider = createReviewTargetProvider({ dataDir: dd, pathFilters: [] });
+    const cfg = { ...makeConfig(), minSeverity: "low" as const };
+    const pipeline = createReviewPipeline({
+      provider,
+      fleet: fakeFleetWith(
+        { summary: "Caches derived per-session facts.", findings: [LOW_RACE] },
+        [{ id: fingerprint(LOW_RACE as never), keep: true, confidence: 0.8 }],
+      ),
+      state,
+      config: () => cfg,
+      dataDir: dd,
+      logger: silentLogger,
+    });
+    const result = await pipeline.run({
+      target: lowTarget(),
+      reason: "manual",
+      full: true,
+      receivedAt: new Date().toISOString(),
+    });
+
+    // The low finding was NOT gated out at default config.
+    expect(result.stats.findingsPosted).toBe(1);
+    expect(result.findings[0].severity).toBe("low");
+    expect(result.findings[0].verified).toBe(true);
+
+    // Walkthrough is non-empty and carries the coverage line.
+    expect(result.walkthrough.trim().length).toBeGreaterThan(0);
+    expect(result.stats.coverage).toMatch(/Reviewed \d+ changed files? \(\d+ hunks?\)/);
+    expect(result.walkthrough).toContain(result.stats.coverage);
+    await rm(dd, { recursive: true, force: true });
+  });
+
+  it("still writes a non-empty walkthrough + coverage line on a 0-finding review", async () => {
+    const { dd, state } = await freshDeps();
+    const provider = createReviewTargetProvider({ dataDir: dd, pathFilters: [] });
+    const pipeline = createReviewPipeline({
+      provider,
+      fleet: fakeFleetWith(
+        { summary: "Read both changed files; confirmed the invariant holds. No issues.", findings: [] },
+        [],
+      ),
+      state,
+      config: () => ({ ...makeConfig(), minSeverity: "low" as const }),
+      dataDir: dd,
+      logger: silentLogger,
+    });
+    const result = await pipeline.run({
+      target: cleanTarget(),
+      reason: "manual",
+      full: true,
+      receivedAt: new Date().toISOString(),
+    });
+
+    expect(result.stats.findingsPosted).toBe(0);
+    expect(result.posted).toBe(false);
+    // Even with 0 findings the walkthrough is non-empty and coverage reads "looked, found nothing".
+    expect(result.walkthrough.trim().length).toBeGreaterThan(0);
+    expect(result.stats.coverage).toContain("0 findings");
+    expect(result.walkthrough).toContain(result.stats.coverage);
+
+    // The local report renders a Walkthrough section (never blank).
+    const files = await readdir(join(dd, "reviews"));
+    const report = await readFile(join(dd, "reviews", files[0]), "utf8");
+    expect(report).toContain("## Walkthrough");
+    expect(report).toContain("0 findings");
+    await rm(dd, { recursive: true, force: true });
+  });
+
+  it("does not duplicate the summary prose into the walkthrough (warren#1)", async () => {
+    const { dd, state } = await freshDeps();
+    const provider = createReviewTargetProvider({ dataDir: dd, pathFilters: [] });
+    const summary = "Read both changed files; confirmed the invariant holds. No issues.";
+    const pipeline = createReviewPipeline({
+      provider,
+      // Agent supplies a summary but NO distinct walkthrough — the case that used to
+      // copy the summary into the walkthrough and render it twice.
+      fleet: fakeFleetWith({ summary, findings: [] }, []),
+      state,
+      config: () => ({ ...makeConfig(), minSeverity: "low" as const }),
+      dataDir: dd,
+      logger: silentLogger,
+    });
+    const result = await pipeline.run({
+      target: cleanTarget(),
+      reason: "manual",
+      full: true,
+      receivedAt: new Date().toISOString(),
+    });
+
+    // Walkthrough is still non-empty (coverage line) but is NOT the summary prose.
+    expect(result.walkthrough.trim().length).toBeGreaterThan(0);
+    expect(result.walkthrough).not.toContain(summary);
+    // The rendered report keeps both headers, but the summary paragraph appears once.
+    const files = await readdir(join(dd, "reviews"));
+    const report = await readFile(join(dd, "reviews", files[0]), "utf8");
+    expect(report).toContain("## Summary");
+    expect(report).toContain("## Walkthrough");
+    expect(report.split(summary).length - 1).toBe(1);
+    await rm(dd, { recursive: true, force: true });
+  });
+});

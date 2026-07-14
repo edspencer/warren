@@ -29,6 +29,19 @@ export function meetsSeverity(sev: Severity, min: Severity): boolean {
   return SEVERITY_RANK[sev] >= SEVERITY_RANK[min];
 }
 
+/**
+ * The severity floor to actually apply for a config. The configured `minSeverity`
+ * (default `low`) surfaces genuine low-severity findings; the assertive profile
+ * lowers the floor to `nit` so style/preference items surface too. This is the ONE
+ * place profile widens the gate — precision still comes from the verify pass.
+ */
+export function effectiveMinSeverity(cfg: {
+  minSeverity: Severity;
+  profile: "chill" | "assertive";
+}): Severity {
+  return cfg.profile === "assertive" ? "nit" : cfg.minSeverity;
+}
+
 /** Default minimum post-verify confidence; findings below this are dropped. */
 export const DEFAULT_MIN_CONFIDENCE = 0.5;
 

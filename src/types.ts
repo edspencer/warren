@@ -106,9 +106,11 @@ export type RawFinding = Omit<Finding, "fingerprint" | "verified" | "confidence"
 
 export interface ReviewStats {
   filesReviewed: number;
+  hunksReviewed: number; // total diff hunks across changed files (coverage signal)
   findingsRaw: number; // emitted by review pass
   findingsVerified: number; // survived verify
   findingsPosted: number; // after severity gate + dedup
+  coverage: string; // one-line human coverage signal (rendered in the walkthrough)
   durationMs: number;
   triageModel: string;
   reviewModel: string;

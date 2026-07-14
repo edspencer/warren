@@ -90,12 +90,20 @@ const SEVERITY_RUBRIC = [
 ].join("\n");
 
 const NOISE_PHILOSOPHY = [
-  "## Precision first",
+  "## Precision first — but do not hide real issues in prose",
   "Precision beats recall. A wrong or speculative comment is worse than a missed one.",
   "Only report a finding you have GROUNDED in evidence you actually observed in the",
-  "checkout (the changed line, a caller you grepped, a type you read). If you are not",
-  "confident, either lower `confidence` and `severity` or omit it. Do not restate what",
-  "the code obviously does, and do not flag pre-existing issues outside the diff.",
+  "checkout (the changed line, a caller you grepped, a type you read). Do not invent",
+  "issues, do not restate what the code obviously does, and do not flag pre-existing",
+  "issues outside the diff.",
+  "",
+  "That precision comes from EVIDENCE, not from suppressing severity. If you genuinely",
+  "believe an issue is real and worth a maintainer's attention, EMIT it as a finding",
+  "with an honest severity (`critical`/`high`/`medium`/`low`) — do NOT bury it in the",
+  "summary prose. A real but low-severity bug (e.g. a narrow race, a resource",
+  "inefficiency, a robustness gap) should be a `low` finding, not a sentence in the",
+  "summary. If you are unsure it is real, gather more evidence or lower `confidence`;",
+  "if it is merely style/preference, keep it out unless the profile is assertive.",
 ].join("\n");
 
 // ─────────────────────────── File listing ───────────────────────────
@@ -201,16 +209,19 @@ export function buildReviewPrompt(ctx: PromptContext): string {
     NOISE_PHILOSOPHY,
     "",
     "## Output protocol",
-    "1. Optionally call `mcp__github_pr__update_walkthrough` once with a markdown walkthrough.",
-    "2. Call `mcp__github_pr__submit_review` ONCE at the end with `{ summary, findings }`,",
-    "   where each finding is `{ path, line, endLine?, side?, severity, category, title,",
-    "   body, suggestion?, confidence }`:",
+    "1. ALWAYS call `mcp__github_pr__submit_review` ONCE at the end with `{ summary, walkthrough,",
+    "   findings }` — even when `findings` is empty. `summary`/`walkthrough` must be a concise",
+    "   2-5 sentences covering WHAT the PR does and WHAT you actually checked (files read,",
+    "   callers grepped, invariants verified), so a clean pass reads as \"looked, found nothing\",",
+    "   never \"gave up\". Do not leave the walkthrough empty.",
+    "2. Each finding is `{ path, line, endLine?, side?, severity, category, title, body,",
+    "   suggestion?, confidence }`:",
     "   - `severity` ∈ critical | high | medium | low | nit",
     "   - `category` ∈ bug | security | performance | correctness | maintainability | style | test | docs",
     "   - `confidence` ∈ 0..1; `suggestion` is raw replacement code with NO code fences.",
     "   (You MAY instead stream findings one at a time via `mcp__github_pr__submit_finding`,",
-    "   then call `submit_review` for the summary.) Do NOT post per-finding to GitHub yourself —",
-    "   Warren verifies and posts a single batched review afterward.",
+    "   then call `submit_review` for the summary/walkthrough.) Do NOT post per-finding to GitHub",
+    "   yourself — Warren verifies and posts a single batched review afterward.",
   ]
     .filter((s) => s !== "")
     .join("\n");

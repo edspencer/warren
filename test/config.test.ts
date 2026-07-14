@@ -23,7 +23,7 @@ describe("config schema + load", () => {
   it("applies all defaults when the file is absent", async () => {
     const cfg = await loadWarrenConfig(join(dir, "does-not-exist.yaml"));
     expect(cfg.profile).toBe("chill");
-    expect(cfg.minSeverity).toBe("medium");
+    expect(cfg.minSeverity).toBe("low");
     expect(cfg.trigger.mode).toBe("poll");
     expect(cfg.trigger.pollIntervalMs).toBe(60_000); // "60s"
     expect(cfg.autoReview.enabled).toBe(true);

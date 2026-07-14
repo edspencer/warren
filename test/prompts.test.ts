@@ -41,10 +41,10 @@ describe("buildReviewPrompt", () => {
     expect(out).toContain("Verify TTL handling is correct.");
   });
 
-  it("directs findings to the submit_review MCP tool", () => {
+  it("directs findings to the submit_review MCP tool with a walkthrough", () => {
     const out = buildReviewPrompt(ctx());
     expect(out).toContain("mcp__github_pr__submit_review");
-    expect(out).toContain("update_walkthrough");
+    expect(out).toContain("walkthrough");
   });
 
   it("enumerates the full severity scale", () => {
@@ -57,6 +57,21 @@ describe("buildReviewPrompt", () => {
   it("injects tone instructions when present", () => {
     const out = buildReviewPrompt(ctx({ toneInstructions: "Be concise and kind." }));
     expect(out).toContain("Be concise and kind.");
+  });
+
+  it("instructs the agent to EMIT low-severity findings instead of burying them in prose", () => {
+    const out = buildReviewPrompt(ctx());
+    expect(out).toMatch(/low.*finding|`low` finding/i);
+    expect(out.toLowerCase()).toContain("prose");
+    // Precision framing is preserved.
+    expect(out.toLowerCase()).toContain("precision");
+    expect(out).toMatch(/do not invent|Do NOT bury|do not restate/i);
+  });
+
+  it("instructs the agent to ALWAYS submit a review + walkthrough, even with no findings", () => {
+    const out = buildReviewPrompt(ctx());
+    expect(out).toMatch(/ALWAYS call `mcp__github_pr__submit_review`/);
+    expect(out).toMatch(/even when `findings` is empty/i);
   });
 });
 
