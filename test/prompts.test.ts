@@ -68,6 +68,17 @@ describe("buildReviewPrompt", () => {
     expect(out).toMatch(/do not invent|Do NOT bury|do not restate/i);
   });
 
+  it("includes the async / error-handling lens (floating promises, tracked-null, races)", () => {
+    const out = buildReviewPrompt(ctx());
+    expect(out).toContain("Async & error-handling lens");
+    expect(out.toLowerCase()).toContain("fire-and-forget");
+    expect(out.toLowerCase()).toContain("unhandled rejection");
+    expect(out.toLowerCase()).toContain("lost-update");
+    expect(out).toMatch(/`\?\?`\/`\|\|`|nullish/i);
+    // Framed as a lens routed through verify, not a mandate to report everything.
+    expect(out.toLowerCase()).toContain("verify pass");
+  });
+
   it("instructs the agent to ALWAYS submit a review + walkthrough, even with no findings", () => {
     const out = buildReviewPrompt(ctx());
     expect(out).toMatch(/ALWAYS call `mcp__github_pr__submit_review`/);

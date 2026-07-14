@@ -106,6 +106,29 @@ const NOISE_PHILOSOPHY = [
   "if it is merely style/preference, keep it out unless the profile is assertive.",
 ].join("\n");
 
+const ASYNC_ERROR_LENS = [
+  "## Async & error-handling lens",
+  "In ADDITION to everything above, deliberately scrutinize these easy-to-miss failure",
+  "modes — they are recurring blind spots. This is a lens for WHERE to look, not a mandate",
+  "to report: each candidate still goes through the adversarial verify pass, so only emit",
+  "what the code actually exhibits and can be grounded in evidence.",
+  "- **Floating / fire-and-forget promises:** a `void <promise>` sink or an un-awaited async",
+  "  call with NO `.catch`/`try`-`catch` around it. The rejection then becomes an",
+  "  unhandled rejection (crashes the process on modern Node) or — if the promise is",
+  "  reassigned into a chain (`this.queue = this.queue.then(...)`) — a rejected link that",
+  "  permanently wedges the queue/task so nothing after it ever runs.",
+  "- **Nullish-vs-falsy & tracked-null conflation:** `??`/`||` fallbacks where the left",
+  "  operand can LEGITIMATELY be `null`/`0`/`\"\"`/`false`. Ask whether that value is a tracked,",
+  "  meaningful state the fallback wrongly discards (e.g. a deliberately-`null` field falling",
+  "  through as if it were absent/untracked, or `||` treating a valid `0` as missing).",
+  "- **Missing `await`:** an async call whose result, ordering, or errors are silently dropped",
+  "  because the promise is not awaited (or not returned).",
+  "- **Read-modify-write / lost-update races:** concurrent callers that read → mutate → write",
+  "  the same shared/cached/persisted value (a state file, an in-memory `Map`, a counter)",
+  "  without a shared lock or serializer, so one writer clobbers another's update. An atomic",
+  "  rename or per-key lock prevents TORN writes but NOT lost updates across different writers.",
+].join("\n");
+
 // ─────────────────────────── File listing ───────────────────────────
 
 function changedFilesBlock(files: PrFile[]): string {
@@ -207,6 +230,8 @@ export function buildReviewPrompt(ctx: PromptContext): string {
     `Drop anything below \`${ctx.minSeverity}\`; ${profileNote}`,
     "",
     NOISE_PHILOSOPHY,
+    "",
+    ASYNC_ERROR_LENS,
     "",
     "## Output protocol",
     "1. ALWAYS call `mcp__github_pr__submit_review` ONCE at the end with `{ summary, walkthrough,",
