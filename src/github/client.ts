@@ -15,7 +15,12 @@
 import type { DiffSide, Logger, RepoRef } from "../types.js";
 import { mapFindingToHunk, parseDiff } from "./diff.js";
 import { DryRunSink, syntheticId, syntheticNodeId } from "./dryrun.js";
-import { fetchReviewThreads, graphqlRequest, RESOLVE_REVIEW_THREAD_MUTATION } from "./graphql.js";
+import {
+  fetchReviewThreads,
+  graphqlRequest,
+  RESOLVE_REVIEW_THREAD_MUTATION,
+  type ReviewThread,
+} from "./graphql.js";
 
 // ─────────────────────────── Public DTOs ───────────────────────────
 
@@ -86,6 +91,8 @@ export interface GitHubClient {
   compare(repo: RepoRef, base: string, head: string): Promise<CompareResult>;
   getFileAtRef(repo: RepoRef, path: string, ref: string): Promise<string>;
   listComments(repo: RepoRef, prNumber: number, sinceId?: number): Promise<IssueComment[]>;
+  /** Review-thread node ids + first-comment body/path (for resolve-on-fix). */
+  listReviewThreads(repo: RepoRef, prNumber: number): Promise<ReviewThread[]>;
 
   // ── WRITES (dry-run gated by `live`) ──
   createReview(
@@ -627,6 +634,9 @@ export class DryRunGitHubClient implements GitHubClient {
   }
   listComments(repo: RepoRef, prNumber: number, sinceId?: number) {
     return this.inner.listComments(repo, prNumber, sinceId);
+  }
+  listReviewThreads(repo: RepoRef, prNumber: number) {
+    return this.inner.listReviewThreads(repo, prNumber);
   }
 
   private capture(w: PreparedWrite): Promise<WriteOutcome> {

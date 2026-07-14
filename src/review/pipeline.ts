@@ -28,7 +28,7 @@ import { targetKey } from "../types.js";
 import type { FleetWrapper } from "../herd/fleet.js";
 import { runAgentTurn } from "../herd/run.js";
 import { reviewerAgentConfig, triageAgentConfig, verifyAgentConfig } from "../herd/reviewer.js";
-import { fingerprint, encodeFindingMarker } from "./fingerprint.js";
+import { fingerprint, encodeFindingMarker, decodeFindingMarker } from "./fingerprint.js";
 import { effectiveMinSeverity, gateFindings, meetsSeverity } from "./gate.js";
 import { buildBatchVerifyPrompt, buildReviewPrompt, buildReviewSystemAppend, buildTriagePrompt, toPromptContext } from "./prompts.js";
 import { createReviewTargetProvider, type MaterializedTarget, type ReviewTargetProvider } from "./target.js";
@@ -54,6 +54,11 @@ export interface ReviewPipelineDeps {
   verify?: boolean;
   /** Run the triage pre-pass. Default false for M1 (hook left in place). */
   triage?: boolean;
+  /**
+   * On re-review, auto-resolve the GitHub thread of a previously-posted finding the
+   * author has since fixed (no longer detected). Overrides `config.resolveOnFix` when set.
+   */
+  resolveOnFix?: boolean;
 }
 
 export interface ReviewPipeline {
@@ -196,19 +201,36 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
 
     // 7. Sink: batched GitHub review, or a local markdown report.
     let stickyId: number | null = st.stickyCommentId;
+    let resolvedFps: string[] = [];
     if (client && target.kind === "github-pr") {
       stickyId = await sinkToGithub(deps, client, target, mt, summary, walkthrough, posted, st.stickyCommentId);
+
+      // 7b. Resolve-on-fix: a previously-posted finding NOT re-detected this run was
+      // fixed by the author → resolve its review thread. "Still present" is judged by
+      // the RAW detected fingerprints (ALL candidates, pre-gate), so a still-real but
+      // gated/deduped finding is never mistaken for fixed. Dry-run captures the resolve.
+      const resolveEnabled = deps.resolveOnFix ?? cfg.resolveOnFix;
+      if (resolveEnabled && st.postedFingerprints.length > 0) {
+        const detected = new Set(candidates.map((c) => c.fingerprint));
+        const disappeared = new Set(st.postedFingerprints.filter((fp) => !detected.has(fp)));
+        if (disappeared.size > 0) {
+          resolvedFps = await resolveFixedThreads(deps, client, target, mt, disappeared);
+        }
+      }
     } else {
       await sinkToLocalReport(deps, target, key, mt, summary, walkthrough, posted);
     }
 
-    // 8. Persist state.
+    // 8. Persist state (drop resolved fingerprints so a re-opened concern can re-post).
     const newFps = posted.map((f) => f.fingerprint);
+    const resolvedSet = new Set(resolvedFps);
     await deps.state.setPrState(key, (s) => ({
       ...s,
       lastReviewedSha: mt.headSha || s.lastReviewedSha,
       stickyCommentId: stickyId ?? s.stickyCommentId,
-      postedFingerprints: dedupe([...s.postedFingerprints, ...newFps]),
+      postedFingerprints: dedupe([...s.postedFingerprints, ...newFps]).filter(
+        (fp) => !resolvedSet.has(fp),
+      ),
     }));
 
     // 9. Result.
@@ -452,6 +474,55 @@ async function sinkToGithub(
     if (typeof sticky.ref === "number") stickyId = sticky.ref;
   }
   return stickyId;
+}
+
+/**
+ * Resolve-on-fix (SPEC §3.8, M2). Fetch the PR's review threads, recover each thread's
+ * finding fingerprint from the hidden marker in its first comment, and resolve every
+ * UNRESOLVED thread whose fingerprint is in `disappeared` (previously posted, not detected
+ * this run). Returns the fingerprints actually resolved so the caller can prune them.
+ *
+ * Path guard: re-reviews are incremental and only re-examine files changed since the last
+ * review, so a thread anchored to a file we did NOT re-review this run is skipped — its
+ * finding may simply be untouched, not fixed. Live resolves the thread; dry-run captures it.
+ */
+async function resolveFixedThreads(
+  deps: ReviewPipelineDeps,
+  client: GitHubClient,
+  target: Extract<ReviewTarget, { kind: "github-pr" }>,
+  mt: MaterializedTarget,
+  disappeared: Set<string>,
+): Promise<string[]> {
+  let threads;
+  try {
+    threads = await client.listReviewThreads(target.repo, target.prNumber);
+  } catch (err) {
+    deps.logger.warn(
+      `pipeline: resolve-on-fix skipped (could not fetch review threads): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return [];
+  }
+
+  const reviewedPaths = new Set(mt.files.map((f) => f.path));
+  const resolved: string[] = [];
+  for (const t of threads) {
+    if (t.isResolved) continue;
+    // Only conclude "fixed" for a file we actually re-reviewed this run.
+    if (t.path != null && !reviewedPaths.has(t.path)) continue;
+    const fp = t.firstCommentBody ? decodeFindingMarker(t.firstCommentBody) : null;
+    if (!fp || !disappeared.has(fp)) continue;
+
+    const outcome = await client.resolveThread(target.repo, t.id);
+    resolved.push(fp);
+    deps.logger.info(
+      `pipeline: resolve-on-fix ${
+        outcome.dryRun ? "captured (dry-run)" : "resolved"
+      } thread ${t.id} for fixed finding ${fp}.`,
+    );
+  }
+  return resolved;
 }
 
 /** Render + write a local markdown review report; returns the file path. */

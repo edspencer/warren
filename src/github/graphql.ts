@@ -47,6 +47,7 @@ export const REVIEW_THREADS_QUERY = /* GraphQL */ `
             id
             isResolved
             isOutdated
+            path
             comments(first: 1) {
               nodes {
                 databaseId
@@ -127,6 +128,8 @@ export interface ReviewThread {
   id: string;
   isResolved: boolean;
   isOutdated: boolean;
+  /** Repo-relative path the thread is anchored to (null for file-less threads). */
+  path: string | null;
   /** databaseId of the thread's first comment — the REST comment id, for cross-ref. */
   firstCommentDatabaseId: number | null;
   firstCommentBody: string | null;
@@ -163,6 +166,7 @@ export async function fetchReviewThreads(
               id: string;
               isResolved: boolean;
               isOutdated: boolean;
+              path: string | null;
               comments: { nodes: Array<{ databaseId: number | null; body: string | null }> };
             }>;
           };
@@ -182,6 +186,7 @@ export async function fetchReviewThreads(
         id: node.id,
         isResolved: node.isResolved,
         isOutdated: node.isOutdated,
+        path: node.path ?? null,
         firstCommentDatabaseId: first?.databaseId ?? null,
         firstCommentBody: first?.body ?? null,
       });
