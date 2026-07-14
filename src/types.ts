@@ -135,13 +135,18 @@ export type WarrenCommandKind =
   | "pause" // stop auto-reviewing this PR
   | "resume" // re-enable auto-review
   | "resolve" // resolve all open Warren threads
-  | "help"; // post the help text
+  | "help" // post the help text
+  | "ask"; // free-form Q&A: resume the reviewer session and answer
 
 export interface WarrenCommand {
   kind: WarrenCommandKind;
   raw: string; // the original comment text (for logging)
-  commentId?: number; // source comment id (for eyes-reaction ack)
+  commentId?: number; // source comment id (for eyes-reaction ack / answer dedup)
   author?: string; // login of commenter
+  /** For kind==="ask": the free-form question text (mention stripped). */
+  question?: string;
+  /** Source-comment channel: "review" = diff-thread reply, "issue" = PR conversation. */
+  commentKind?: "issue" | "review";
 }
 
 // ─────────────────────────── Config types ───────────────────────────────

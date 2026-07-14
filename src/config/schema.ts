@@ -10,7 +10,7 @@ import type { RepoConfig, WarrenConfig } from "../types.js";
 export type { RepoConfig, WarrenConfig } from "../types.js";
 
 const SeverityZ = z.enum(["critical", "high", "medium", "low", "nit"]);
-const CommandZ = z.enum(["review", "full_review", "pause", "resume", "resolve", "help"]);
+const CommandZ = z.enum(["review", "full_review", "pause", "resume", "resolve", "help", "ask"]);
 
 /** "60s" | "5m" | 60000 -> ms */
 const DurationMsZ = z
@@ -86,7 +86,7 @@ const WarrenConfigRawZ = z.object({
     .default({}),
   commands_allowed: z
     .array(CommandZ)
-    .default(["review", "full_review", "pause", "resume", "resolve", "help"]),
+    .default(["review", "full_review", "pause", "resume", "resolve", "help", "ask"]),
   models: z
     .object({
       // CORRECTED model ids (spec placeholders were stale):

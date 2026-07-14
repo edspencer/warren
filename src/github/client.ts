@@ -58,6 +58,8 @@ export interface IssueComment {
   body: string;
   author: string;
   createdAt: string;
+  /** Channel this comment came from: "issue" = PR conversation, "review" = diff thread. */
+  kind?: "issue" | "review";
 }
 
 export interface ReviewSubmission {
@@ -113,6 +115,11 @@ export interface GitHubClient {
     commentId: number,
     body: string,
   ): Promise<WriteOutcome>;
+  /**
+   * Post a NEW top-level PR conversation (issue) comment. Used to answer a free-form
+   * `@warren` question raised in an issue comment (which has no threaded-reply endpoint).
+   */
+  postIssueComment(repo: RepoRef, prNumber: number, body: string): Promise<WriteOutcome>;
   resolveThread(repo: RepoRef, threadId: string): Promise<WriteOutcome>;
   addReaction(repo: RepoRef, commentId: number, content: ReactionContent): Promise<WriteOutcome>;
   /**
@@ -174,6 +181,20 @@ export function buildReplyWrite(
     kind: "replyToThread",
     method: "POST",
     path: `/repos/${repo.owner}/${repo.name}/pulls/${prNumber}/comments/${commentId}/replies`,
+    body: { body },
+    syntheticRef: syntheticId(),
+  };
+}
+
+export function buildPostIssueCommentWrite(
+  repo: RepoRef,
+  prNumber: number,
+  body: string,
+): PreparedWrite {
+  return {
+    kind: "postIssueComment",
+    method: "POST",
+    path: `/repos/${repo.owner}/${repo.name}/issues/${prNumber}/comments`,
     body: { body },
     syntheticRef: syntheticId(),
   };
@@ -464,7 +485,10 @@ export class RestGitHubClient implements GitHubClient {
         `/repos/${repo.owner}/${repo.name}/pulls/${prNumber}/comments`,
       ),
     ]);
-    let merged = [...issue, ...review].map(toIssueComment);
+    let merged = [
+      ...issue.map((c) => toIssueComment(c, "issue")),
+      ...review.map((c) => toIssueComment(c, "review")),
+    ];
     if (sinceId != null) merged = merged.filter((c) => c.id > sinceId);
     merged.sort((a, b) => a.id - b.id);
     return merged;
@@ -559,6 +583,12 @@ export class RestGitHubClient implements GitHubClient {
     body: string,
   ): Promise<WriteOutcome> {
     const w = buildReplyWrite(repo, prNumber, commentId, body);
+    const json = await this.requestJson<{ id: number }>(w.method, w.path, w.body);
+    return { dryRun: false, ref: json?.id ?? null };
+  }
+
+  async postIssueComment(repo: RepoRef, prNumber: number, body: string): Promise<WriteOutcome> {
+    const w = buildPostIssueCommentWrite(repo, prNumber, body);
     const json = await this.requestJson<{ id: number }>(w.method, w.path, w.body);
     return { dryRun: false, ref: json?.id ?? null };
   }
@@ -669,6 +699,10 @@ export class DryRunGitHubClient implements GitHubClient {
 
   replyToThread(repo: RepoRef, prNumber: number, commentId: number, body: string) {
     return this.capture(buildReplyWrite(repo, prNumber, commentId, body));
+  }
+
+  postIssueComment(repo: RepoRef, prNumber: number, body: string) {
+    return this.capture(buildPostIssueCommentWrite(repo, prNumber, body));
   }
 
   resolveThread(repo: RepoRef, threadId: string) {
@@ -788,12 +822,13 @@ function toPrFile(f: RawFile): PrFile {
   };
 }
 
-function toIssueComment(c: RawIssueComment): IssueComment {
+function toIssueComment(c: RawIssueComment, kind?: "issue" | "review"): IssueComment {
   return {
     id: c.id,
     body: c.body ?? "",
     author: c.user?.login ?? "",
     createdAt: c.created_at,
+    ...(kind ? { kind } : {}),
   };
 }
 
