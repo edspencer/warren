@@ -18,6 +18,7 @@
     "@fastify/websocket": "^11.0.0",
     "@herdctl/core": "^5.18.2",
     "fastify": "^5.0.0",
+    "jose": "^6.2.3",
     "yaml": "^2.5.0",
     "zod": "^3.23.0"
   },
