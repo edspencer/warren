@@ -222,12 +222,19 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
     }
 
     // 8. Persist state (drop resolved fingerprints so a re-opened concern can re-post).
+    // Capture the reviewer's herdctl session id so a later `@warren <question>` (ask.ts)
+    // can RESUME this exact conversation — genuine continuity, not context reconstruction.
+    // Only overwrite on a successful turn that yielded a session id; a failed/absent turn
+    // keeps the prior (still-resumable) session.
+    const reviewerSessionId =
+      reviewTurn.result.success && reviewTurn.result.sessionId ? reviewTurn.result.sessionId : undefined;
     const newFps = posted.map((f) => f.fingerprint);
     const resolvedSet = new Set(resolvedFps);
     await deps.state.setPrState(key, (s) => ({
       ...s,
       lastReviewedSha: mt.headSha || s.lastReviewedSha,
       stickyCommentId: stickyId ?? s.stickyCommentId,
+      reviewerSessionId: reviewerSessionId ?? s.reviewerSessionId,
       postedFingerprints: dedupe([...s.postedFingerprints, ...newFps]).filter(
         (fp) => !resolvedSet.has(fp),
       ),

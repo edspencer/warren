@@ -119,6 +119,31 @@ export function triageAgentConfig(params: AgentConfigParams): ReviewerAgentConfi
 }
 
 /**
+ * Conversational ASK pass (Opus by default). Answers a free-form `@warren <question>`
+ * by RESUMING the reviewer's session (genuine continuity) or, when no session exists,
+ * reasoning over the checkout + reconstructed PR context. It has NO write tools and NO
+ * injected MCP — its ONLY output is text, which Warren posts back as the reply (the
+ * agent never touches a credential). Read-only evidence tools mirror the reviewer.
+ */
+export function askAgentConfig(params: AgentConfigParams): ReviewerAgentConfig {
+  const { name, workingDir, model = REVIEW_MODEL, maxTurns = 20, maxConcurrent = 4 } = params;
+  return {
+    name,
+    description: `Warren conversational answerer (${name}).`,
+    working_directory: workingDir,
+    runtime: "cli",
+    model,
+    permission_mode: "acceptEdits",
+    max_turns: maxTurns,
+    instances: { max_concurrent: maxConcurrent },
+    // No github_pr MCP and no write tools: the ask agent only produces a text answer.
+    allowed_tools: ["Read", "Grep", "Glob", "Bash", "Task", "TodoWrite", "ToolSearch"],
+    denied_tools: REVIEWER_DENIED_TOOLS,
+    default_prompt: "Answer the question about this PR.",
+  };
+}
+
+/**
  * Cheap adversarial verify pass (Haiku by default). Gathers evidence to REFUTE a
  * proposed finding — Read/Grep/Glob to inspect code, Bash to run cheap offline
  * checks (lint/tests) — then reports a keep/drop verdict.

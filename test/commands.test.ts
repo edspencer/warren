@@ -44,12 +44,38 @@ describe("parseCommand (body-level)", () => {
     expect(parseCommand("@warren-bot resume", "warren-bot")?.kind).toBe("resume");
   });
 
-  it("returns null for junk / unrecognized verbs", () => {
-    expect(parseCommand("just a normal comment")).toBeNull();
-    expect(parseCommand("@warren")).toBeNull();
-    expect(parseCommand("@warren frobnicate")).toBeNull();
+  it("returns null for a bare mention, a non-mention, or a mid-line mention", () => {
+    expect(parseCommand("just a normal comment")).toBeNull(); // no mention
+    expect(parseCommand("@warren")).toBeNull(); // bare mention — not a command
+    expect(parseCommand("@warren   ")).toBeNull(); // bare mention w/ trailing ws
     expect(parseCommand("please @warren review")).toBeNull(); // mention not at line start
     expect(parseCommand("")).toBeNull();
+  });
+});
+
+describe("parseCommand — free-form ask (conversational Q&A)", () => {
+  it("treats a mention + non-verb text as an ask, carrying the question", () => {
+    const cmd = parseCommand("@warren why is this loop safe?");
+    expect(cmd?.kind).toBe("ask");
+    expect(cmd?.question).toBe("why is this loop safe?");
+  });
+
+  it("known verbs still win over ask (they are not free-form)", () => {
+    expect(parseCommand("@warren review")?.kind).toBe("review");
+    expect(parseCommand("@warren full review")?.kind).toBe("full_review");
+    expect(parseCommand("@warren pause")?.kind).toBe("pause");
+  });
+
+  it("captures a multi-line question spanning lines after the mention", () => {
+    const cmd = parseCommand("@warren can you explain\nthe retry logic here?");
+    expect(cmd?.kind).toBe("ask");
+    expect(cmd?.question).toBe("can you explain\nthe retry logic here?");
+  });
+
+  it("works with an alternate bot login", () => {
+    const cmd = parseCommand("@warren-bot what does this regex match?", "warren-bot");
+    expect(cmd?.kind).toBe("ask");
+    expect(cmd?.question).toBe("what does this regex match?");
   });
 });
 
@@ -71,5 +97,24 @@ describe("parseWarrenCommand (comment-level seam)", () => {
 
   it("returns null for non-command comments", () => {
     expect(parseWarrenCommand(comment({ body: "lgtm 👍" }))).toBeNull();
+  });
+
+  it("carries the question + comment channel through for an ask", () => {
+    const cmd = parseWarrenCommand(
+      comment({ id: 9, author: "dana", body: "@warren does this handle nulls?", kind: "review" }),
+    );
+    expect(cmd).toEqual({
+      kind: "ask",
+      raw: "@warren does this handle nulls?",
+      commentId: 9,
+      author: "dana",
+      question: "does this handle nulls?",
+      commentKind: "review",
+    });
+  });
+
+  it("still ignores the bot's own ask-shaped comments", () => {
+    const self = comment({ author: "warren-bot", body: "@warren here is the answer you asked for" });
+    expect(parseWarrenCommand(self, "warren-bot")).toBeNull();
   });
 });

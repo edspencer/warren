@@ -16,6 +16,8 @@ export interface PrState {
   paused: boolean; // @warren pause
   ignored: boolean; // never auto-review (config or command)
   lastSeenCommentId: number; // highest comment id processed for commands (0 = none)
+  reviewerSessionId: string; // herdctl session id of the last review (for @warren ask resume); "" = none
+  answeredCommentIds: number[]; // comment ids already answered by an ask reply (dedup)
   updatedAt: string; // ISO ("" when never persisted)
 }
 
@@ -41,6 +43,8 @@ export function zeroPrState(key: string): PrState {
     paused: false,
     ignored: false,
     lastSeenCommentId: 0,
+    reviewerSessionId: "",
+    answeredCommentIds: [],
     updatedAt: "",
   };
 }

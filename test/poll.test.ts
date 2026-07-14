@@ -180,6 +180,53 @@ describe("PollTriggerSource (github)", () => {
     expect((await state.getPrState(KEY)).lastSeenCommentId).toBe(9);
   });
 
+  it("emits a reason:'command' ask event (with question + channel) for a free-form @warren comment", async () => {
+    const state = createReviewStateStore(dataDir);
+    await state.setPrState(KEY, (s) => ({ ...s, lastReviewedSha: "sha1" }));
+
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        state,
+        client: fakeClient([pr({ headSha: "sha1" })], {
+          1: [comment({ id: 12, author: "alice", body: "@warren why is this safe?", kind: "review" })],
+        }),
+        config: config({
+          commandsAllowed: ["review", "full_review", "pause", "resume", "resolve", "help", "ask"],
+        }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.reason).toBe("command");
+    expect(events[0]!.command?.kind).toBe("ask");
+    expect(events[0]!.command?.question).toBe("why is this safe?");
+    expect(events[0]!.command?.commentKind).toBe("review");
+    expect(events[0]!.full).toBe(false);
+  });
+
+  it("skips an ask when 'ask' is not in commandsAllowed", async () => {
+    const state = createReviewStateStore(dataDir);
+    await state.setPrState(KEY, (s) => ({ ...s, lastReviewedSha: "sha1" }));
+
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        state,
+        client: fakeClient([pr({ headSha: "sha1" })], {
+          1: [comment({ id: 13, author: "alice", body: "@warren what does this do?" })],
+        }),
+        // Default config() omits "ask".
+        config: config(),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+    expect(events).toHaveLength(0);
+    // The comment id is still advanced so it is not re-scanned every tick.
+    expect((await state.getPrState(KEY)).lastSeenCommentId).toBe(13);
+  });
+
   it("ignores the bot's own comments (no command loop)", async () => {
     const state = createReviewStateStore(dataDir);
     await state.setPrState(KEY, (s) => ({ ...s, lastReviewedSha: "sha1" }));
