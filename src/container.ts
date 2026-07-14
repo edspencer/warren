@@ -17,6 +17,7 @@ import {
   type ReviewTargetProvider,
 } from "./review/target.js";
 import { createFleet, type FleetWrapper } from "./herd/fleet.js";
+import { handleAsk, type AskHandlerDeps } from "./herd/ask.js";
 import { createReviewPipeline, type ReviewPipeline } from "./review/pipeline.js";
 import { createJobQueue, type JobQueue } from "./trigger/queue.js";
 import { createTriggerSource, type TriggerSource } from "./trigger/source.js";
@@ -158,9 +159,28 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
     logger,
   });
 
-  // Job queue: keyed on targetKey, superseding on new heads.
+  // Conversational-ask handler deps: a `@warren <question>` resumes the PR's reviewer
+  // session (by the id captured in PrState) and posts an answer server-side.
+  const askDeps: AskHandlerDeps = {
+    fleet,
+    provider,
+    state,
+    clientFor,
+    config: configFor,
+    logger,
+  };
+
+  // Job queue: keyed on targetKey, superseding on new heads. A `command` event whose
+  // command is a free-form `ask` is routed to the ask handler (resume + answer); every
+  // other event runs a review pass. Both share the queue's supersede-by-key + bounded
+  // concurrency, so at most one job per PR runs at a time.
   const queue = createJobQueue({
-    handler: (e: ReviewEvent) => pipeline.run(e),
+    handler: (e: ReviewEvent) => {
+      if (e.reason === "command" && e.command?.kind === "ask") {
+        return handleAsk(askDeps, { target: e.target, command: e.command });
+      }
+      return pipeline.run(e);
+    },
     concurrency: config.concurrency,
     cancelInFlight: (key: string) => {
       // The pipeline owns herd job ids internally; container-level supersede is

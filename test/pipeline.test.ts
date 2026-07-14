@@ -8,6 +8,7 @@ import { createReviewTargetProvider } from "../src/review/target.js";
 import { fingerprint } from "../src/review/fingerprint.js";
 import type { FleetWrapper } from "../src/herd/fleet.js";
 import type { LocalGitTarget, Logger, ReviewEvent, WarrenConfig } from "../src/types.js";
+import { targetKey } from "../src/types.js";
 import { runGit } from "../src/review/target.js";
 
 // ─────────────────────────── Fixtures ───────────────────────────
@@ -332,6 +333,32 @@ describe("recall + coverage + walkthrough (default low config)", () => {
     const report = await readFile(join(dd, "reviews", files[0]), "utf8");
     expect(report).toContain("## Walkthrough");
     expect(report).toContain("0 findings");
+    await rm(dd, { recursive: true, force: true });
+  });
+
+  it("persists the reviewer herdctl session id so @warren ask can resume it", async () => {
+    const { dd, state } = await freshDeps();
+    const provider = createReviewTargetProvider({ dataDir: dd, pathFilters: [] });
+    const t: LocalGitTarget = { ...target(), label: "local:sesscap" };
+    const pipeline = createReviewPipeline({
+      provider,
+      // Clean review (no findings) → only the reviewer turn runs → its session is sess-1.
+      fleet: fakeFleetWith({ summary: "No issues found.", findings: [] }, []),
+      state,
+      config: () => ({ ...makeConfig(), minSeverity: "low" as const }),
+      dataDir: dd,
+      logger: silentLogger,
+    });
+    const result = await pipeline.run({
+      target: t,
+      reason: "manual",
+      full: true,
+      receivedAt: new Date().toISOString(),
+    });
+
+    expect(result.sessionId).toBe("sess-1");
+    const st = await state.getPrState(targetKey(t));
+    expect(st.reviewerSessionId).toBe("sess-1");
     await rm(dd, { recursive: true, force: true });
   });
 
