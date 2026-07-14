@@ -47,6 +47,13 @@ describe("buildReviewPrompt", () => {
     expect(out).toContain("walkthrough");
   });
 
+  it("prefers a committable in-diff suggestion over prose for localized fixes", () => {
+    const out = buildReviewPrompt(ctx());
+    expect(out).toContain("Commit suggestion");
+    expect(out.toLowerCase()).toContain("committable");
+    expect(out.toLowerCase()).toContain("inside this diff");
+  });
+
   it("enumerates the full severity scale", () => {
     const out = buildReviewPrompt(ctx());
     for (const sev of ["critical", "high", "medium", "low", "nit"]) {
