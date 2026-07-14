@@ -1,9 +1,31 @@
 {
   "name": "warren",
   "version": "0.0.0",
-  "description": "Self-hosted AI code-review bot for GitHub PRs, built on the Claude Agent SDK",
+  "description": "Self-hosted, agentic AI code-review bot for GitHub PRs, built on the Claude Agent SDK. A CodeRabbit alternative that runs on your own Claude Max plan at ~zero marginal cost.",
   "type": "module",
   "license": "MIT",
+  "keywords": [
+    "code-review",
+    "github",
+    "pull-request",
+    "claude",
+    "anthropic",
+    "agent",
+    "claude-agent-sdk",
+    "ai",
+    "coderabbit",
+    "self-hosted",
+    "bot"
+  ],
+  "homepage": "https://github.com/edspencer/warren#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edspencer/warren.git"
+  },
+  "bugs": {
+    "url": "https://github.com/edspencer/warren/issues"
+  },
+  "author": "Ed Spencer",
   "bin": {
     "warren": "dist/index.js"
   },
