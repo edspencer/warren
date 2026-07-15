@@ -13,7 +13,7 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Warren — review dashboard</title>
 <style>
   :root {
@@ -77,10 +77,10 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   .bar-row { display: grid; grid-template-columns: 74px 1fr 40px; align-items: center; gap: 10px; }
   .bar-track { background: var(--panel-2); border-radius: 6px; height: 16px; overflow: hidden; }
   .bar-fill { height: 100%; background: var(--accent); border-radius: 6px; min-width: 2px; }
-  .series { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 6px; }
-  .series .col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 8px; }
-  .series .col .stalk { width: 70%; background: var(--accent-2); border-radius: 4px 4px 0 0; min-height: 2px; }
-  .series .col .day { color: var(--muted); font-size: 10px; transform: rotate(-45deg); white-space: nowrap; }
+  .series { position: relative; display: flex; align-items: flex-end; gap: 4px; height: 132px; padding: 6px 0 22px; }
+  .series .col { position: relative; flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; min-width: 8px; }
+  .series .col .stalk { width: 70%; background: var(--accent-2); border-radius: 4px 4px 0 0; min-height: 3px; }
+  .series .col .day { position: absolute; bottom: -18px; color: var(--muted); font-size: 10px; transform: rotate(-45deg); white-space: nowrap; }
   .muted { color: var(--muted); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   .back { cursor: pointer; color: var(--accent); margin-bottom: 12px; display: inline-block; }
@@ -95,6 +95,74 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   .token-bar input { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 8px; width: 260px; }
   .token-bar button { background: var(--accent-2); color: #fff; border: 0; padding: 6px 12px; border-radius: 8px; cursor: pointer; }
   .banner { background: rgba(255,107,107,.14); border: 1px solid var(--crit); color: var(--crit); padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; display: none; }
+
+  /* ---------- Responsive / mobile (patterns mirror Paddock PR #203) ---------- */
+  /* Safe-area chrome under viewport-fit=cover; max(fallback, env) keeps the
+     original padding on non-notched devices where the inset resolves to 0. */
+  header {
+    padding-top: max(14px, env(safe-area-inset-top));
+    padding-left: max(22px, env(safe-area-inset-left));
+    padding-right: max(22px, env(safe-area-inset-right));
+  }
+  main {
+    padding-left: max(22px, env(safe-area-inset-left));
+    padding-right: max(22px, env(safe-area-inset-right));
+    padding-bottom: max(22px, env(safe-area-inset-bottom));
+  }
+  /* Kill the grey tap-flash box on touch. */
+  button, a, tr.clickable { -webkit-tap-highlight-color: transparent; }
+
+  @media (max-width: 640px) {
+    /* iOS zooms whenever a focused form control has computed font-size < 16px
+       (which would also break the layout). Our token input is 14px, so bump
+       form controls to 16px on small screens — the accessible fix, NOT
+       user-scalable=no. !important so it wins over any element/utility rule. */
+    input, textarea, select { font-size: 16px !important; }
+
+    header {
+      flex-wrap: wrap; gap: 10px 12px;
+      padding: max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left));
+    }
+    header .brand { font-size: 15px; }
+    header .brand small { display: none; }
+    header .spacer { display: none; }
+    header .mode { order: 2; margin-left: auto; }
+    nav { order: 3; width: 100%; margin-left: 0; gap: 6px; }
+    nav button { flex: 1; min-height: 40px; padding: 9px 6px; }
+    .token-bar { order: 4; width: 100%; }
+    .token-bar input { flex: 1 1 auto; width: auto; min-width: 0; }
+
+    main { padding: 16px max(14px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); }
+    h2 { font-size: 17px; }
+    .cards { grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; }
+    .card { padding: 12px 13px; }
+    .card .value { font-size: 22px; }
+    .panel { padding: 13px; }
+    .bar-row { grid-template-columns: 64px 1fr 32px; gap: 8px; }
+    .series { height: 118px; }
+
+    /* Tables → stacked cards: each row a card, each cell a label/value line
+       (label supplied via data-label; see renderRepos/renderReviews). */
+    thead { display: none; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    tbody tr {
+      border: 1px solid var(--border); border-radius: 10px;
+      background: var(--panel-2); padding: 4px 12px; margin-bottom: 10px;
+    }
+    tr.clickable:hover td, tr.clickable:active td { background: transparent; }
+    td {
+      border: 0; padding: 7px 0; font-size: 13px;
+      display: flex; gap: 12px; justify-content: space-between; align-items: baseline;
+    }
+    td + td { border-top: 1px solid var(--border); }
+    td::before {
+      content: attr(data-label); color: var(--muted);
+      font-size: 11px; text-transform: uppercase; letter-spacing: .3px;
+      flex: 0 0 auto; white-space: nowrap;
+    }
+    td.empty { display: block; text-align: center; padding: 18px 0; }
+    td.empty::before { content: none; }
+  }
 </style>
 </head>
 <body>
@@ -183,9 +251,9 @@ function card(label, value) {
 async function renderRepos() {
   const { repos } = await api("/api/repos");
   const rows = repos.length ? repos.map(r =>
-    '<tr><td>' + esc(r.repo) + (r.watched ? '' : ' <span class="muted">(unwatched)</span>') + '</td>' +
-    '<td>' + r.reviewCount + '</td>' +
-    '<td class="muted">' + fmtTime(r.lastReviewAt) + '</td></tr>'
+    '<tr><td data-label="Repo">' + esc(r.repo) + (r.watched ? '' : ' <span class="muted">(unwatched)</span>') + '</td>' +
+    '<td data-label="Reviews">' + r.reviewCount + '</td>' +
+    '<td data-label="Last review" class="muted">' + fmtTime(r.lastReviewAt) + '</td></tr>'
   ).join("") : '<tr><td colspan="3" class="empty">No repositories.</td></tr>';
   app.innerHTML = '<h2>Repositories</h2><div class="panel"><table>' +
     '<thead><tr><th>Repo</th><th>Reviews</th><th>Last review</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
@@ -195,12 +263,12 @@ async function renderReviews() {
   const { records, total } = await api("/api/reviews?limit=100");
   const rows = records.length ? records.map(r =>
     '<tr class="clickable" data-id="' + esc(r.id) + '">' +
-    '<td>' + esc(r.repo) + (r.prNumber != null ? ' <span class="muted">#' + r.prNumber + '</span>' : '') + '</td>' +
-    '<td class="muted">' + fmtTime(r.timestamp) + '</td>' +
-    '<td>' + r.stats.filesReviewed + '</td>' +
-    '<td>' + r.findingsPosted + '</td>' +
-    '<td class="muted">' + fmtMs(r.wallMs) + '</td>' +
-    '<td class="mono">' + esc((r.headSha || "").slice(0,7)) + '</td></tr>'
+    '<td data-label="Repo">' + esc(r.repo) + (r.prNumber != null ? ' <span class="muted">#' + r.prNumber + '</span>' : '') + '</td>' +
+    '<td data-label="When" class="muted">' + fmtTime(r.timestamp) + '</td>' +
+    '<td data-label="Files">' + r.stats.filesReviewed + '</td>' +
+    '<td data-label="Findings">' + r.findingsPosted + '</td>' +
+    '<td data-label="Wall" class="muted">' + fmtMs(r.wallMs) + '</td>' +
+    '<td data-label="Head" class="mono">' + esc((r.headSha || "").slice(0,7)) + '</td></tr>'
   ).join("") : '<tr><td colspan="6" class="empty">No reviews recorded yet.</td></tr>';
   app.innerHTML = '<h2>Reviews <span class="muted">(' + total + ')</span></h2><div class="panel"><table>' +
     '<thead><tr><th>Repo</th><th>When</th><th>Files</th><th>Findings</th><th>Wall</th><th>Head</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
