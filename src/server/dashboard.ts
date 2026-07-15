@@ -77,10 +77,10 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   .bar-row { display: grid; grid-template-columns: 74px 1fr 40px; align-items: center; gap: 10px; }
   .bar-track { background: var(--panel-2); border-radius: 6px; height: 16px; overflow: hidden; }
   .bar-fill { height: 100%; background: var(--accent); border-radius: 6px; min-width: 2px; }
-  .series { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 6px; }
-  .series .col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 8px; }
-  .series .col .stalk { width: 70%; background: var(--accent-2); border-radius: 4px 4px 0 0; min-height: 2px; }
-  .series .col .day { color: var(--muted); font-size: 10px; transform: rotate(-45deg); white-space: nowrap; }
+  .series { position: relative; display: flex; align-items: flex-end; gap: 4px; height: 132px; padding: 6px 0 22px; }
+  .series .col { position: relative; flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; min-width: 8px; }
+  .series .col .stalk { width: 70%; background: var(--accent-2); border-radius: 4px 4px 0 0; min-height: 3px; }
+  .series .col .day { position: absolute; bottom: -18px; color: var(--muted); font-size: 10px; transform: rotate(-45deg); white-space: nowrap; }
   .muted { color: var(--muted); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   .back { cursor: pointer; color: var(--accent); margin-bottom: 12px; display: inline-block; }
@@ -139,7 +139,7 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
     .card .value { font-size: 22px; }
     .panel { padding: 13px; }
     .bar-row { grid-template-columns: 64px 1fr 32px; gap: 8px; }
-    .series { height: 96px; }
+    .series { height: 118px; }
 
     /* Tables → stacked cards: each row a card, each cell a label/value line
        (label supplied via data-label; see renderRepos/renderReviews). */
