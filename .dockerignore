@@ -1,0 +1,15 @@
+# Keep the build context small and deterministic. node_modules and dist are
+# rebuilt inside the image; everything else here is irrelevant to the build.
+node_modules
+dist
+.git
+.github
+.changeset
+coverage
+data
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+.playwright-mcp
