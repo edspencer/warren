@@ -30,6 +30,35 @@ jobs:
       - name: Build
         run: npm run build
 
+  changeset:
+    name: Changeset present
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Require every PR to add a changeset (so its change actually ships in a
+      # release), OR opt out explicitly with the `no-changeset` label for
+      # version-neutral PRs (docs / CI / chore-only).
+      - name: Require a changeset (or the 'no-changeset' label)
+        env:
+          BASE: ${{ github.base_ref }}
+          SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'no-changeset') }}
+        run: |
+          if [ "$SKIP" = "true" ]; then
+            echo "no-changeset label present — skipping the changeset requirement."
+            exit 0
+          fi
+          git fetch --quiet origin "$BASE"
+          added="$(git diff --name-only --diff-filter=AM "origin/${BASE}...HEAD" -- '.changeset/*.md' \
+            | grep -vE '\.changeset/(README\.md|config\.json)$' || true)"
+          if [ -z "$added" ]; then
+            echo "::error::No changeset found. Run 'npm run changeset', commit the generated .changeset/*.md and push — or add the 'no-changeset' label if this PR needs no release (docs / CI / chore-only)."
+            exit 1
+          fi
+          echo "Changeset(s) present:"; printf '%s\n' "$added"
+
   docker-build:
     name: Validate Docker image builds
     runs-on: ubuntu-latest
