@@ -32,7 +32,9 @@ jobs:
 
   changeset:
     name: Changeset present
-    if: github.event_name == 'pull_request'
+    # Skip on the changesets-generated "chore: version packages" PR — it CONSUMES
+    # changesets (deletes them) rather than adding one, so it must not be gated.
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'changeset-release/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
