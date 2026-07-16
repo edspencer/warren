@@ -168,6 +168,11 @@ export interface WarrenConfig {
     enabled: boolean;
     drafts: boolean;
     baseBranches: string[]; // only auto-review PRs targeting these
+    // Author allowlist: when NON-EMPTY, only PRs whose author login is on this
+    // list are auto-reviewed AND commented on (case-insensitive match). Empty
+    // (default) = no author gating — every author is reviewed (legacy behavior).
+    // Also gates @warren command-triggered reviews on the same PR-author policy.
+    authors: string[];
   };
   pathFilters: string[]; // gitignore-style; "!" prefix = exclude
   pathInstructions: Array<{ path: string; instructions: string }>;

@@ -88,7 +88,7 @@ function makeConfig(): WarrenConfig {
     profile: "chill",
     minSeverity: "medium",
     trigger: { mode: "poll", pollIntervalMs: 60000 },
-    autoReview: { enabled: true, drafts: false, baseBranches: ["main"] },
+    autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: [] },
     pathFilters: [],
     pathInstructions: [],
     walkthrough: { sequenceDiagrams: false, poem: false },

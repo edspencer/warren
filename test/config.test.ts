@@ -28,6 +28,7 @@ describe("config schema + load", () => {
     expect(cfg.trigger.pollIntervalMs).toBe(60_000); // "60s"
     expect(cfg.autoReview.enabled).toBe(true);
     expect(cfg.autoReview.baseBranches).toEqual(["main"]);
+    expect(cfg.autoReview.authors).toEqual([]); // no author gating by default
     expect(cfg.live).toBe(false); // dry-run default
     expect(cfg.concurrency).toBe(3);
     expect(cfg.repos).toEqual([]);
@@ -49,6 +50,7 @@ describe("config schema + load", () => {
       "auto_review:",
       "  drafts: true",
       "  base_branches: [main, develop]",
+      "  authors: [edspencer, octocat]",
       "walkthrough:",
       "  poem: true",
       "repos:",
@@ -70,6 +72,7 @@ describe("config schema + load", () => {
     expect(cfg.trigger.pollIntervalMs).toBe(5 * 60_000);
     expect(cfg.autoReview.drafts).toBe(true);
     expect(cfg.autoReview.baseBranches).toEqual(["main", "develop"]);
+    expect(cfg.autoReview.authors).toEqual(["edspencer", "octocat"]);
     expect(cfg.walkthrough.poem).toBe(true);
     expect(cfg.repos).toHaveLength(1);
     expect(cfg.repos[0].localGit).toEqual({

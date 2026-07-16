@@ -32,6 +32,18 @@ import type { TriggerSource, TriggerSourceDeps } from "./source.js";
 
 type EmitFn = (e: ReviewEvent) => void;
 
+/**
+ * Author allowlist gate (SAFETY, issue #21). Returns true when `login` is allowed
+ * to be reviewed/commented on. An empty allowlist means no gating — everyone is
+ * allowed (legacy behavior). Matching is case-insensitive (GitHub logins are).
+ */
+export function isAuthorAllowed(login: string | undefined, authors: string[]): boolean {
+  if (authors.length === 0) return true;
+  if (!login) return false;
+  const want = login.toLowerCase();
+  return authors.some((a) => a.toLowerCase() === want);
+}
+
 export class PollTriggerSource implements TriggerSource {
   private readonly deps: TriggerSourceDeps;
   private readonly logger: Logger;
@@ -176,6 +188,16 @@ export class PollTriggerSource implements TriggerSource {
         this.logger.info(`poll: resumed ${key} via @warren resume`);
         continue;
       }
+      // SAFETY (#21): apply the SAME author allowlist to @warren command-triggered
+      // reviews/answers — gate on the PR AUTHOR (whose PR gets reviewed/commented
+      // on), not the commenter. Pause/resume above are harmless state ops and are
+      // left ungated. Empty allowlist = allow everyone (legacy behavior).
+      if (!isAuthorAllowed(pr.author, cfg.autoReview.authors)) {
+        this.logger.debug(
+          `poll: PR author '${pr.author}' not on auto_review.authors allowlist; ignoring @warren '${cmd.kind}' on ${key}`,
+        );
+        continue;
+      }
       emit({
         target,
         reason: "command",
@@ -205,6 +227,14 @@ export class PollTriggerSource implements TriggerSource {
     if (!cfg.autoReview.enabled) return;
     if (pr.draft && !cfg.autoReview.drafts) return;
     if (!cfg.autoReview.baseBranches.includes(pr.baseRef)) return;
+    // SAFETY (#21): never auto-review/comment on a PR whose author is not on the
+    // allowlist. Empty allowlist = review everyone (legacy behavior).
+    if (!isAuthorAllowed(pr.author, cfg.autoReview.authors)) {
+      this.logger.debug(
+        `poll: PR author '${pr.author}' not on auto_review.authors allowlist; skipping ${key}`,
+      );
+      return;
+    }
 
     // Re-read state: a pause/resume command in this same tick may have changed it.
     const st = await this.deps.state.getPrState(key);

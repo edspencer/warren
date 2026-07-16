@@ -31,6 +31,11 @@ auto_review:
   enabled: true
   drafts: false          # also review draft PRs
   base_branches: [main]  # only auto-review PRs targeting these base branches
+  # SAFETY allowlist of PR author logins (case-insensitive). Empty (default) =
+  # review EVERY author. When set, Warren only reviews AND comments on PRs opened
+  # by these logins — and @warren commands on other authors' PRs are ignored.
+  # Scope a fresh install to just yourself while testing, e.g. [your-login].
+  authors: []
 
 # Glob filters applied to changed files. `!` negates (exclude). Defaults exclude
 # build output, lockfiles, and vendored deps.

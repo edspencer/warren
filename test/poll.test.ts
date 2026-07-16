@@ -61,7 +61,7 @@ function config(over: Partial<WarrenConfig> = {}): WarrenConfig {
     profile: "chill",
     minSeverity: "medium",
     trigger: { mode: "poll", pollIntervalMs: 60_000 },
-    autoReview: { enabled: true, drafts: false, baseBranches: ["main"] },
+    autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: [] },
     pathFilters: [],
     pathInstructions: [],
     walkthrough: { sequenceDiagrams: false, poem: false },
@@ -243,6 +243,102 @@ describe("PollTriggerSource (github)", () => {
     );
     await src.tick((e) => events.push(e));
     expect(events).toHaveLength(0);
+  });
+
+  it("author allowlist: reviews an allowlisted author (case-insensitive)", async () => {
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        client: fakeClient([pr({ author: "Alice" })]),
+        // Different casing than the PR author to prove the match is case-insensitive.
+        config: config({
+          autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: ["alice"] },
+        }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.reason).toBe("new_pr");
+  });
+
+  it("author allowlist: skips a non-allowlisted author (never enqueued)", async () => {
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        client: fakeClient([pr({ author: "mallory" })]),
+        config: config({
+          autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: ["alice"] },
+        }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+
+    expect(events).toHaveLength(0);
+  });
+
+  it("author allowlist: empty list reviews everyone (unchanged behavior)", async () => {
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        client: fakeClient([pr({ author: "anyone" })]),
+        config: config({
+          autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: [] },
+        }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.reason).toBe("new_pr");
+  });
+
+  it("author allowlist: ignores @warren commands on a non-allowlisted author's PR", async () => {
+    const state = createReviewStateStore(dataDir);
+    // Pre-seed lastReviewedSha === head so only the command path can fire.
+    await state.setPrState(KEY, (s) => ({ ...s, lastReviewedSha: "sha1" }));
+
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        state,
+        // PR by a non-allowlisted author; even a commenter's @warren review is ignored.
+        client: fakeClient([pr({ headSha: "sha1", author: "mallory" })], {
+          1: [comment({ id: 9, author: "mallory", body: "@warren review" })],
+        }),
+        config: config({
+          autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: ["alice"] },
+        }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+
+    expect(events).toHaveLength(0);
+    // The comment id is still advanced so it is not re-scanned every tick.
+    expect((await state.getPrState(KEY)).lastSeenCommentId).toBe(9);
+  });
+
+  it("author allowlist: still honors @warren commands on an allowlisted author's PR", async () => {
+    const state = createReviewStateStore(dataDir);
+    await state.setPrState(KEY, (s) => ({ ...s, lastReviewedSha: "sha1" }));
+
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        state,
+        client: fakeClient([pr({ headSha: "sha1", author: "alice" })], {
+          1: [comment({ id: 9, author: "alice", body: "@warren review" })],
+        }),
+        config: config({
+          autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: ["alice"] },
+        }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]!.reason).toBe("command");
+    expect(events[0]!.command?.kind).toBe("review");
   });
 
   it("skips drafts and non-target base branches", async () => {
