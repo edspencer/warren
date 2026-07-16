@@ -5,6 +5,13 @@
 // no runtime file reads. Vanilla JS + fetch + inline CSS — dependency-light by
 // design (see the dashboard deliverable). Dark-mode-friendly.
 //
+// Routing: a small History-API client router (#12). Routes `/`, `/repos`,
+// `/reviews`, `/reviews/:id` are real, deep-linkable URLs; browser back/forward
+// work and nav active-state is derived from the URL. The server serves this same
+// shell for every client route (SPA fallback in app.ts) so a hard refresh or a
+// pasted deep link renders correctly. Room is left for `/repos/:owner/:name` and
+// `/findings` that later tickets add — an unknown path renders a Not-found view.
+//
 // Auth: on load the SPA calls the unauthenticated GET /api/auth-mode. In `jwt`
 // mode it reads a token from localStorage (prompting if absent / on any 401) and
 // sends it as `Authorization: Bearer <token>` on every /api/* call.
@@ -29,20 +36,24 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
+  /* Visible keyboard focus everywhere (a11y — #20). Mouse users don't see it. */
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
   header {
     display: flex; align-items: center; gap: 16px; padding: 14px 22px;
     border-bottom: 1px solid var(--border); background: var(--panel);
     position: sticky; top: 0; z-index: 10;
   }
   header .brand { font-weight: 700; font-size: 16px; letter-spacing: .2px; }
+  header .brand a { color: inherit; }
+  header .brand a:hover { text-decoration: none; }
   header .brand small { color: var(--muted); font-weight: 400; margin-left: 6px; }
   nav { display: flex; gap: 4px; margin-left: 8px; }
-  nav button {
-    background: transparent; color: var(--muted); border: 0; padding: 7px 12px;
-    border-radius: 8px; cursor: pointer; font-size: 14px;
+  nav a {
+    display: inline-block; background: transparent; color: var(--muted); border: 0;
+    padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; line-height: 1;
   }
-  nav button.active { background: var(--panel-2); color: var(--text); }
-  nav button:hover { color: var(--text); }
+  nav a.active { background: var(--panel-2); color: var(--text); }
+  nav a:hover { color: var(--text); text-decoration: none; }
   header .spacer { flex: 1; }
   header .mode { color: var(--muted); font-size: 12px; }
   main { padding: 22px; max-width: 1100px; margin: 0 auto; }
@@ -64,6 +75,8 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   th { color: var(--muted); font-weight: 600; }
   tr.clickable { cursor: pointer; }
   tr.clickable:hover td { background: var(--panel-2); }
+  tr.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  tr.clickable:focus-visible td { background: var(--panel-2); }
   .badge {
     display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px;
     font-weight: 700; text-transform: uppercase; letter-spacing: .3px;
@@ -77,20 +90,56 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   .bar-row { display: grid; grid-template-columns: 74px 1fr 40px; align-items: center; gap: 10px; }
   .bar-track { background: var(--panel-2); border-radius: 6px; height: 16px; overflow: hidden; }
   .bar-fill { height: 100%; background: var(--accent); border-radius: 6px; min-width: 2px; }
-  .series { position: relative; display: flex; align-items: flex-end; gap: 4px; height: 132px; padding: 6px 0 22px; }
-  .series .col { position: relative; flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; min-width: 8px; }
-  .series .col .stalk { width: 70%; background: var(--accent-2); border-radius: 4px 4px 0 0; min-height: 3px; }
-  .series .col .day { position: absolute; bottom: -18px; color: var(--muted); font-size: 10px; transform: rotate(-45deg); white-space: nowrap; }
+
+  /* ---------- Reviews-over-time chart (#13 — inline SVG, proportional) ---------- */
+  .chart { width: 100%; }
+  .chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .chart .bar { fill: var(--accent-2); transition: fill .12s ease; }
+  .chart .barhit { cursor: default; }
+  .chart .barhit:hover .bar { fill: var(--accent); }
+  .chart .axis { stroke: var(--border); stroke-width: 1; }
+  .chart .grid { stroke: var(--border); stroke-dasharray: 3 3; opacity: .5; }
+  .chart .lbl { fill: var(--muted); font: 12px system-ui, sans-serif; }
+  .chart .val { fill: var(--muted); font: 11px system-ui, sans-serif; }
+
   .muted { color: var(--muted); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-  .back { cursor: pointer; color: var(--accent); margin-bottom: 12px; display: inline-block; }
+  .back {
+    cursor: pointer; color: var(--accent); margin-bottom: 12px; display: inline-block;
+    background: none; border: 0; padding: 4px 2px; font: inherit;
+  }
+  .back:hover { text-decoration: underline; }
   .finding { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: var(--panel-2); }
   .finding .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .finding .title { font-weight: 600; }
   .finding .loc { margin-top: 4px; }
   .finding .body { margin-top: 8px; white-space: pre-wrap; }
   .md { white-space: pre-wrap; }
-  .empty { color: var(--muted); padding: 20px; text-align: center; }
+  .empty { color: var(--muted); padding: 28px 20px; text-align: center; }
+  .empty h2 { color: var(--text); }
+
+  /* Error state (#20) — a real, retryable failure surface (not a bare string). */
+  .error-box {
+    border: 1px solid var(--crit); background: rgba(255,107,107,.1); border-radius: 12px;
+    padding: 18px 20px; text-align: center;
+  }
+  .error-box .error-title { font-weight: 700; color: var(--crit); margin-bottom: 6px; }
+  .error-box button {
+    margin-top: 12px; background: var(--accent-2); color: #fff; border: 0;
+    padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  .error-box button:hover { background: var(--accent); }
+
+  /* Loading skeletons (#20) — shimmer placeholders shown while a view fetches. */
+  .skeleton {
+    background: linear-gradient(90deg, var(--panel-2) 25%, #262b36 37%, var(--panel-2) 63%);
+    background-size: 400% 100%; animation: shimmer 1.3s ease-in-out infinite; border-radius: 8px;
+  }
+  @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+  .sk-line { height: 12px; }
+  .sk-chart { height: 190px; }
+  .sk-row { height: 40px; margin: 8px 0; }
+
   .token-bar { display: none; gap: 8px; align-items: center; }
   .token-bar input { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 8px; width: 260px; }
   .token-bar button { background: var(--accent-2); color: #fff; border: 0; padding: 6px 12px; border-radius: 8px; cursor: pointer; }
@@ -112,6 +161,12 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   /* Kill the grey tap-flash box on touch. */
   button, a, tr.clickable { -webkit-tap-highlight-color: transparent; }
 
+  /* Respect reduced-motion: no shimmer animation. */
+  @media (prefers-reduced-motion: reduce) {
+    .skeleton { animation: none; }
+    .chart .bar { transition: none; }
+  }
+
   @media (max-width: 640px) {
     /* iOS zooms whenever a focused form control has computed font-size < 16px
        (which would also break the layout). Our token input is 14px, so bump
@@ -128,7 +183,7 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
     header .spacer { display: none; }
     header .mode { order: 2; margin-left: auto; }
     nav { order: 3; width: 100%; margin-left: 0; gap: 6px; }
-    nav button { flex: 1; min-height: 40px; padding: 9px 6px; }
+    nav a { flex: 1; min-height: 40px; padding: 9px 6px; text-align: center; line-height: 22px; }
     .token-bar { order: 4; width: 100%; }
     .token-bar input { flex: 1 1 auto; width: auto; min-width: 0; }
 
@@ -139,7 +194,6 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
     .card .value { font-size: 22px; }
     .panel { padding: 13px; }
     .bar-row { grid-template-columns: 64px 1fr 32px; gap: 8px; }
-    .series { height: 118px; }
 
     /* Tables → stacked cards: each row a card, each cell a label/value line
        (label supplied via data-label; see renderRepos/renderReviews). */
@@ -167,27 +221,28 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
 </head>
 <body>
 <header>
-  <div class="brand">🐇 Warren <small>review dashboard</small></div>
-  <nav id="nav">
-    <button data-view="overview" class="active">Overview</button>
-    <button data-view="repos">Repos</button>
-    <button data-view="reviews">Reviews</button>
+  <div class="brand"><a href="/" data-link>🐇 Warren</a> <small>review dashboard</small></div>
+  <nav id="nav" aria-label="Primary">
+    <a href="/" data-link data-view="overview" class="active" aria-current="page">Overview</a>
+    <a href="/repos" data-link data-view="repos">Repos</a>
+    <a href="/reviews" data-link data-view="reviews">Reviews</a>
   </nav>
   <div class="spacer"></div>
   <div class="token-bar" id="tokenBar">
-    <input id="tokenInput" type="password" placeholder="Bearer token" />
+    <input id="tokenInput" type="password" placeholder="Bearer token" aria-label="Bearer token" />
     <button id="tokenSave">Save</button>
   </div>
   <div class="mode" id="modeLabel"></div>
 </header>
 <main>
-  <div class="banner" id="banner"></div>
-  <div id="app"></div>
+  <div class="banner" id="banner" role="alert"></div>
+  <div id="app" aria-live="polite"></div>
 </main>
 <script>
-const state = { mode: "none", view: "overview" };
+const state = { mode: "none" };
 const app = document.getElementById("app");
 const banner = document.getElementById("banner");
+const nav = document.getElementById("nav");
 
 function token() { return localStorage.getItem("warren_token") || ""; }
 function setToken(t) { if (t) localStorage.setItem("warren_token", t); else localStorage.removeItem("warren_token"); }
@@ -201,6 +256,7 @@ async function api(path) {
     showBanner("Authentication required — enter a valid bearer token.");
     throw new Error("unauthorized");
   }
+  if (res.status === 404) throw new Error("not_found");
   if (!res.ok) throw new Error("HTTP " + res.status);
   return res.json();
 }
@@ -212,25 +268,27 @@ function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&
 function fmtMs(ms) { if (ms == null) return "—"; if (ms < 1000) return ms + "ms"; return (ms/1000).toFixed(1) + "s"; }
 function fmtTime(iso) { if (!iso) return "—"; const d = new Date(iso); return d.toLocaleString(); }
 function sevBadge(sev) { return '<span class="badge sev-' + esc(sev) + '">' + esc(sev) + '</span>'; }
+function card(label, value) {
+  return '<div class="card"><div class="label">' + esc(label) + '</div><div class="value">' + esc(value) + '</div></div>';
+}
+
+// ─────────────────────────────── views ───────────────────────────────
+// Each view is an async fn returning { html, wire? }. render() shows a
+// skeleton, awaits the fn, and (if not superseded) commits its html.
 
 async function renderOverview() {
   const o = await api("/api/overview");
   const sev = o.totalFindings.bySeverity;
   const maxSev = Math.max(1, ...Object.values(sev));
   const sevOrder = ["critical","high","medium","low","nit"];
+  const sevVar = { critical:"crit", high:"high", medium:"med", low:"low", nit:"nit" };
   const bars = sevOrder.map(s =>
     '<div class="bar-row">' + sevBadge(s) +
-    '<div class="bar-track"><div class="bar-fill sev-' + s + '" style="width:' + (100*(sev[s]||0)/maxSev) + '%;background:var(--' + ({critical:"crit",high:"high",medium:"med",low:"low",nit:"nit"})[s] + ')"></div></div>' +
+    '<div class="bar-track"><div class="bar-fill sev-' + s + '" style="width:' + (100*(sev[s]||0)/maxSev) + '%;background:var(--' + sevVar[s] + ')"></div></div>' +
     '<div style="text-align:right">' + (sev[s]||0) + '</div></div>'
   ).join("");
 
-  const series = o.reviewsOverTime || [];
-  const maxDay = Math.max(1, ...series.map(d => d.count));
-  const cols = series.length ? series.map(d =>
-    '<div class="col" title="' + esc(d.date) + ': ' + d.count + '"><div class="stalk" style="height:' + (100*d.count/maxDay) + '%"></div><div class="day">' + esc(d.date.slice(5)) + '</div></div>'
-  ).join("") : '<div class="empty">No reviews yet.</div>';
-
-  app.innerHTML =
+  const html =
     '<h2>Overview</h2>' +
     '<div class="cards">' +
       card("Total reviews", o.totalReviews) +
@@ -241,11 +299,53 @@ async function renderOverview() {
       card("Last review", o.lastReviewAt ? fmtTime(o.lastReviewAt) : "—") +
     '</div>' +
     '<div class="panel"><h3>Findings by severity</h3><div class="bars">' + bars + '</div></div>' +
-    '<div class="panel"><h3>Reviews over time</h3><div class="series">' + cols + '</div></div>';
+    '<div class="panel"><h3>Reviews over time</h3>' + reviewsChart(o.reviewsOverTime || []) + '</div>';
+  return { html };
 }
 
-function card(label, value) {
-  return '<div class="card"><div class="label">' + esc(label) + '</div><div class="value">' + esc(value) + '</div></div>';
+// #13 — inline-SVG bar chart. Robust for sparse/single-day data: a real y-scale
+// (bars are a fraction of the plot height, not a CSS % that collapses), a min
+// bar height so any non-zero day is visible, day labels (thinned when dense), a
+// native hover tooltip per bar, and a proper empty state.
+function reviewsChart(series) {
+  if (!series.length) {
+    return '<div class="empty">No reviews yet — this chart fills in once reviews are recorded.</div>';
+  }
+  const W = 900, H = 190, padL = 34, padR = 14, padT = 14, padB = 32;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const baseY = padT + plotH;
+  const n = series.length;
+  const max = Math.max(1, ...series.map(d => d.count));
+  const band = plotW / n;
+  const bw = Math.min(46, band * 0.62);
+  const labelEvery = Math.ceil(n / 12); // thin labels so they never collide
+
+  let bars = "";
+  series.forEach((d, i) => {
+    const cx = padL + band * i + band / 2;
+    const h = d.count > 0 ? Math.max(4, (d.count / max) * plotH) : 0;
+    const x = cx - bw / 2;
+    const y = baseY - h;
+    const showLbl = (i % labelEvery === 0) || i === n - 1;
+    const tip = esc(d.date) + ": " + d.count + " review" + (d.count === 1 ? "" : "s");
+    bars +=
+      '<g class="barhit"><title>' + tip + '</title>' +
+      // invisible full-height hit target so hover works even above short bars
+      '<rect x="' + (padL + band * i).toFixed(1) + '" y="' + padT + '" width="' + band.toFixed(1) + '" height="' + plotH + '" fill="transparent"></rect>' +
+      (h > 0 ? '<rect class="bar" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="3"></rect>' : '') +
+      (showLbl ? '<text class="lbl" x="' + cx.toFixed(1) + '" y="' + (H - 10) + '" text-anchor="middle">' + esc(d.date.slice(5)) + '</text>' : '') +
+      '</g>';
+  });
+
+  const axis =
+    '<line class="grid" x1="' + padL + '" y1="' + padT + '" x2="' + (W - padR) + '" y2="' + padT + '"></line>' +
+    '<line class="axis" x1="' + padL + '" y1="' + baseY + '" x2="' + (W - padR) + '" y2="' + baseY + '"></line>' +
+    '<text class="val" x="' + (padL - 6) + '" y="' + (padT + 4) + '" text-anchor="end">' + max + '</text>' +
+    '<text class="val" x="' + (padL - 6) + '" y="' + (baseY) + '" text-anchor="end">0</text>';
+
+  const label = "Reviews over time: " + n + " day" + (n === 1 ? "" : "s") + ", up to " + max + " per day";
+  return '<div class="chart"><svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + esc(label) + '" preserveAspectRatio="xMidYMid meet">' +
+    axis + bars + '</svg></div>';
 }
 
 async function renderRepos() {
@@ -254,15 +354,17 @@ async function renderRepos() {
     '<tr><td data-label="Repo">' + esc(r.repo) + (r.watched ? '' : ' <span class="muted">(unwatched)</span>') + '</td>' +
     '<td data-label="Reviews">' + r.reviewCount + '</td>' +
     '<td data-label="Last review" class="muted">' + fmtTime(r.lastReviewAt) + '</td></tr>'
-  ).join("") : '<tr><td colspan="3" class="empty">No repositories.</td></tr>';
-  app.innerHTML = '<h2>Repositories</h2><div class="panel"><table>' +
-    '<thead><tr><th>Repo</th><th>Reviews</th><th>Last review</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  ).join("") : '<tr><td colspan="3" class="empty">No repositories watched yet.</td></tr>';
+  const html = '<h2>Repositories</h2><div class="panel"><table>' +
+    '<thead><tr><th scope="col">Repo</th><th scope="col">Reviews</th><th scope="col">Last review</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  return { html };
 }
 
 async function renderReviews() {
   const { records, total } = await api("/api/reviews?limit=100");
   const rows = records.length ? records.map(r =>
-    '<tr class="clickable" data-id="' + esc(r.id) + '">' +
+    '<tr class="clickable" role="link" tabindex="0" data-href="/reviews/' + encodeURIComponent(r.id) + '"' +
+    ' aria-label="Open review of ' + esc(r.repo) + (r.prNumber != null ? ' PR ' + r.prNumber : '') + '">' +
     '<td data-label="Repo">' + esc(r.repo) + (r.prNumber != null ? ' <span class="muted">#' + r.prNumber + '</span>' : '') + '</td>' +
     '<td data-label="When" class="muted">' + fmtTime(r.timestamp) + '</td>' +
     '<td data-label="Files">' + r.stats.filesReviewed + '</td>' +
@@ -270,15 +372,21 @@ async function renderReviews() {
     '<td data-label="Wall" class="muted">' + fmtMs(r.wallMs) + '</td>' +
     '<td data-label="Head" class="mono">' + esc((r.headSha || "").slice(0,7)) + '</td></tr>'
   ).join("") : '<tr><td colspan="6" class="empty">No reviews recorded yet.</td></tr>';
-  app.innerHTML = '<h2>Reviews <span class="muted">(' + total + ')</span></h2><div class="panel"><table>' +
-    '<thead><tr><th>Repo</th><th>When</th><th>Files</th><th>Findings</th><th>Wall</th><th>Head</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
-  app.querySelectorAll("tr.clickable").forEach(tr =>
-    tr.addEventListener("click", () => renderReviewDetail(tr.getAttribute("data-id")))
-  );
+  const html = '<h2>Reviews <span class="muted">(' + total + ')</span></h2><div class="panel"><table>' +
+    '<thead><tr><th scope="col">Repo</th><th scope="col">When</th><th scope="col">Files</th><th scope="col">Findings</th><th scope="col">Wall</th><th scope="col">Head</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  return { html };
 }
 
 async function renderReviewDetail(id) {
-  const r = await api("/api/reviews/" + encodeURIComponent(id));
+  let r;
+  try {
+    r = await api("/api/reviews/" + encodeURIComponent(id));
+  } catch (e) {
+    if (e.message === "not_found") {
+      return { html: backLink() + '<div class="empty"><h2>Review not found</h2><p class="muted">No review with id <span class="mono">' + esc(id) + '</span>.</p></div>' };
+    }
+    throw e;
+  }
   const findings = (r.findings || []).map(f =>
     '<div class="finding"><div class="head">' + sevBadge(f.severity) +
     '<span class="badge sev-nit">' + esc(f.category) + '</span>' +
@@ -290,8 +398,8 @@ async function renderReviewDetail(id) {
     '</div>'
   ).join("") || '<div class="empty">No findings posted.</div>';
 
-  app.innerHTML =
-    '<span class="back" id="back">← Back to reviews</span>' +
+  const html =
+    backLink() +
     '<h2>' + esc(r.repo) + (r.prNumber != null ? ' #' + r.prNumber : '') + '</h2>' +
     '<div class="cards">' +
       card("Findings posted", r.stats.findingsPosted) +
@@ -304,26 +412,129 @@ async function renderReviewDetail(id) {
     (r.summary ? '<div class="panel"><h3>Summary</h3><div class="md">' + esc(r.summary) + '</div></div>' : '') +
     (r.walkthrough ? '<div class="panel"><h3>Walkthrough</h3><div class="md">' + esc(r.walkthrough) + '</div></div>' : '') +
     '<div class="panel"><h3>Findings (' + (r.findings || []).length + ')</h3>' + findings + '</div>';
-  document.getElementById("back").addEventListener("click", () => switchView("reviews"));
+  return { html };
 }
 
-const views = { overview: renderOverview, repos: renderRepos, reviews: renderReviews };
+function backLink() {
+  return '<a class="back" href="/reviews" data-link>← Back to reviews</a>';
+}
 
-async function switchView(view) {
-  state.view = view;
-  document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.getAttribute("data-view") === view));
+// ─────────────────────────────── skeletons ───────────────────────────────
+function skCards(n) {
+  return '<div class="cards">' + Array.from({ length: n }).map(() =>
+    '<div class="card"><div class="skeleton sk-line" style="width:55%"></div>' +
+    '<div class="skeleton sk-line" style="width:75%;height:22px;margin-top:8px"></div></div>').join("") + '</div>';
+}
+function skRows(n) {
+  return Array.from({ length: n }).map(() => '<div class="skeleton sk-row"></div>').join("");
+}
+function skOverview() {
+  return '<h2>Overview</h2>' + skCards(6) +
+    '<div class="panel"><h3>Findings by severity</h3>' + skRows(3) + '</div>' +
+    '<div class="panel"><h3>Reviews over time</h3><div class="skeleton sk-chart"></div></div>';
+}
+function skList(title) {
+  return '<h2>' + title + '</h2><div class="panel">' + skRows(6) + '</div>';
+}
+function skDetail() {
+  return backLink() + skCards(5) + '<div class="panel">' + skRows(4) + '</div>';
+}
+
+// ─────────────────────────────── router ───────────────────────────────
+// Room is left for /repos/:owner/:name and /findings that later tickets add.
+const routes = [
+  { name: "overview", re: /^\/$/, load: renderOverview, skeleton: () => skOverview() },
+  { name: "repos", re: /^\/repos\/?$/, load: renderRepos, skeleton: () => skList("Repositories") },
+  { name: "reviews", re: /^\/reviews\/?$/, load: renderReviews, skeleton: () => skList("Reviews") },
+  { name: "reviewDetail", re: /^\/reviews\/([^/]+)\/?$/, load: (m) => renderReviewDetail(decodeURIComponent(m[1])), skeleton: () => skDetail() },
+];
+
+/** Nav highlight key for a route (detail rolls up under Reviews). */
+function navKeyFor(name) { return name === "reviewDetail" ? "reviews" : name; }
+
+function matchRoute(path) {
+  for (const r of routes) { const m = r.re.exec(path); if (m) return { route: r, m }; }
+  return null;
+}
+
+function setActiveNav(name) {
+  const key = navKeyFor(name);
+  nav.querySelectorAll("a").forEach(a => {
+    const active = a.getAttribute("data-view") === key;
+    a.classList.toggle("active", active);
+    if (active) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+  });
+}
+
+let renderSeq = 0;
+async function render() {
+  const path = location.pathname;
+  const match = matchRoute(path);
   showBanner("");
-  try { await (views[view] || renderOverview)(); }
-  catch (e) { if (e.message !== "unauthorized") app.innerHTML = '<div class="empty">Failed to load: ' + esc(e.message) + '</div>'; }
+  const seq = ++renderSeq;
+  if (!match) {
+    setActiveNav("");
+    app.innerHTML = '<div class="empty"><h2>Not found</h2><p class="muted">No page at <span class="mono">' +
+      esc(path) + '</span>.</p><p><a href="/" data-link>← Back to overview</a></p></div>';
+    return;
+  }
+  setActiveNav(match.route.name);
+  app.innerHTML = match.route.skeleton();
+  try {
+    const out = await match.route.load(match.m);
+    if (seq !== renderSeq) return; // a newer navigation superseded this one
+    app.innerHTML = out.html;
+    if (out.wire) out.wire(app);
+  } catch (e) {
+    if (seq !== renderSeq) return;
+    if (e.message === "unauthorized") {
+      app.innerHTML = '<div class="empty">Authentication required — enter a valid bearer token above, then retry.</div>';
+      return;
+    }
+    app.innerHTML =
+      '<div class="error-box"><div class="error-title">Couldn’t load this view</div>' +
+      '<div class="muted">' + esc(e.message) + '</div>' +
+      '<button type="button" data-retry>Retry</button></div>';
+    const btn = app.querySelector("[data-retry]");
+    if (btn) btn.addEventListener("click", () => render());
+  }
 }
 
-document.getElementById("nav").addEventListener("click", e => {
-  const v = e.target.getAttribute && e.target.getAttribute("data-view");
-  if (v) switchView(v);
+function navigate(path, opts) {
+  opts = opts || {};
+  const current = location.pathname + location.search;
+  if (path !== current) {
+    if (opts.replace) history.replaceState(null, "", path);
+    else history.pushState(null, "", path);
+  }
+  render();
+}
+
+// Intercept internal-link clicks (nav + back link + not-found link).
+document.addEventListener("click", e => {
+  const a = e.target.closest && e.target.closest("a[data-link]");
+  if (!a) return;
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  navigate(a.getAttribute("href"));
 });
+
+// Clickable table rows (role="link") — click + keyboard (Enter/Space).
+app.addEventListener("click", e => {
+  const el = e.target.closest && e.target.closest("[data-href]");
+  if (el && app.contains(el)) { e.preventDefault(); navigate(el.getAttribute("data-href")); }
+});
+app.addEventListener("keydown", e => {
+  if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+  const el = e.target.closest && e.target.closest("[data-href]");
+  if (el && app.contains(el)) { e.preventDefault(); navigate(el.getAttribute("data-href")); }
+});
+
+window.addEventListener("popstate", () => render());
+
 document.getElementById("tokenSave").addEventListener("click", () => {
   setToken(document.getElementById("tokenInput").value.trim());
-  showBanner(""); switchView(state.view);
+  showBanner(""); render();
 });
 
 async function boot() {
@@ -336,7 +547,7 @@ async function boot() {
     showTokenBar(true);
     document.getElementById("tokenInput").value = token();
   }
-  switchView("overview");
+  render();
 }
 boot();
 </script>

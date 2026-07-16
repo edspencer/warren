@@ -24,5 +24,25 @@ export function createServer(app: WarrenApp): FastifyInstance {
   });
 
   registerRoutes(server, app);
+
+  // SPA fallback (#12): serve the same shell for every *client* route so a hard
+  // refresh or a pasted deep link (e.g. /reviews/:id) hydrates the router instead
+  // of 404ing. Only GET navigations that aren't API/probe/action paths get the
+  // shell; unknown /api/* (and everything else) still returns a JSON 404. The
+  // auth hook only guards /api/*, so these open shell routes never leak data.
+  // NB: exact matches for the singular server routes (`/status`, `/review`) so
+  // they don't shadow the client routes `/reviews` and `/reviews/:id`.
+  const NON_SHELL_EXACT = new Set(["/healthz", "/status", "/review"]);
+  const isServerPath = (path: string): boolean =>
+    NON_SHELL_EXACT.has(path) || path === "/api" || path.startsWith("/api/");
+  server.setNotFoundHandler((request, reply) => {
+    const path = request.url.split("?")[0];
+    if (request.method === "GET" && !isServerPath(path)) {
+      reply.type("text/html").send(DASHBOARD_HTML);
+      return;
+    }
+    reply.code(404).send({ error: "not found" });
+  });
+
   return server;
 }
