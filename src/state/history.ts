@@ -28,6 +28,8 @@ export interface HistoryFinding {
   endLine?: number;
   confidence: number;
   verified: boolean;
+  /** Raw replacement code for a ```suggestion``` block (no fences), if the finding carried one. */
+  suggestion?: string;
 }
 
 /** Dashboard-facing stats subset (mirrors ReviewStats, without model bookkeeping). */
@@ -134,6 +136,10 @@ function toHistoryFinding(f: Finding): HistoryFinding {
     ...(f.endLine != null ? { endLine: f.endLine } : {}),
     confidence: f.confidence,
     verified: f.verified,
+    // Persist the suggested replacement so the dashboard can render a suggestion
+    // diff on the review-detail page (#18). Only present when the finding carried
+    // one; the explanatory `body` stays stripped (dashboard-facing subset only).
+    ...(f.suggestion != null && f.suggestion !== "" ? { suggestion: f.suggestion } : {}),
   };
 }
 

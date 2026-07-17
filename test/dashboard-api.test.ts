@@ -273,4 +273,36 @@ describe("dashboard API", () => {
     expect(res.statusCode).toBe(404);
     await server.close();
   });
+
+  it("GET /api/reviews/:id exposes a finding's suggestion for the detail view (#18)", async () => {
+    const { app, history } = makeFakeApp({ dataDir });
+    const rec = await history.append(
+      ghResult({ pr: 8, findings: [makeFinding({ suggestion: "await sleep(ms);" })] }),
+    );
+    const server = createServer(app);
+    const res = await server.inject({ method: "GET", url: "/api/reviews/" + rec!.id });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().findings[0].suggestion).toBe("await sleep(ms);");
+    await server.close();
+  });
+});
+
+describe("dashboard SPA (GitHub links + markdown, #14/#18)", () => {
+  it("ships the markdown renderer and GitHub-link helpers in the shell", async () => {
+    const { app } = makeFakeApp({ dataDir });
+    const server = createServer(app);
+    const res = await server.inject({ method: "GET", url: "/" });
+    const html = res.body;
+    // #18: real markdown renderer (not the old escaped pre-wrap blob).
+    expect(html).toContain("function mdToHtml");
+    expect(html).toContain("mdToHtml(r.summary)");
+    expect(html).toContain("mdToHtml(r.walkthrough)");
+    // #14: PR + exact-location link builders, and a suggestion block.
+    expect(html).toContain("function prUrl");
+    expect(html).toContain("function findingUrl");
+    expect(html).toContain("/pull/");
+    expect(html).toContain("/blob/");
+    expect(html).toContain("Suggested change");
+    await server.close();
+  });
 });

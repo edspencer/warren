@@ -135,6 +135,18 @@ describe("recordFromResult", () => {
     expect(rec.id.length).toBeGreaterThan(0);
   });
 
+  it("persists a finding's suggestion when present, omits it when absent (#18)", () => {
+    const withSug = recordFromResult(
+      ghResult({ findings: [finding({ suggestion: "const x = await foo();" }), finding()] }),
+    );
+    expect(withSug.findings[0].suggestion).toBe("const x = await foo();");
+    // A finding that carried no suggestion doesn't get an empty key.
+    expect(withSug.findings[1]).not.toHaveProperty("suggestion");
+    // An empty-string suggestion is treated as "none" (not persisted).
+    const emptySug = recordFromResult(ghResult({ findings: [finding({ suggestion: "" })] }));
+    expect(emptySug.findings[0]).not.toHaveProperty("suggestion");
+  });
+
   it("uses the local label as repo and omits prNumber for local-git", () => {
     const rec = recordFromResult(localResult("local:x"));
     expect(rec.kind).toBe("local-git");
