@@ -118,6 +118,29 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   .empty { color: var(--muted); padding: 28px 20px; text-align: center; }
   .empty h2 { color: var(--text); }
 
+  /* Clickable stat cards (#15/#17) — a card that is itself a link into a drill-down. */
+  a.card.cardlink { display: block; color: inherit; text-decoration: none; transition: border-color .12s ease; }
+  a.card.cardlink:hover { border-color: var(--accent); text-decoration: none; }
+
+  /* Clickable severity bars (#15) — each bar row drills into a filtered Findings list. */
+  a.bar-row.barlink { color: inherit; text-decoration: none; padding: 2px 4px; margin: 0 -4px; border-radius: 8px; }
+  a.bar-row.barlink:hover { text-decoration: none; background: var(--panel-2); }
+  a.bar-row.barlink:hover .bar-track { outline: 1px solid var(--accent); }
+
+  /* Finding cards link to their review + GitHub (#15). */
+  .finding a.title { color: var(--text); }
+  .finding a.title:hover { color: var(--accent); text-decoration: underline; }
+  .finding .finding-meta { margin-top: 8px; font-size: 12px; }
+  .filterbar { margin: -6px 0 14px; font-size: 13px; }
+
+  /* Read-only effective-config table (#19). */
+  .cfg-row { display: grid; grid-template-columns: 190px 1fr; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .cfg-row:last-child { border-bottom: 0; }
+  .cfg-k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
+  .cfg-v { word-break: break-word; }
+  .cfg-v .pi { margin-top: 4px; }
+  @media (max-width: 640px) { .cfg-row { grid-template-columns: 1fr; gap: 3px; } }
+
   /* Error state (#20) — a real, retryable failure surface (not a bare string). */
   .error-box {
     border: 1px solid var(--crit); background: rgba(255,107,107,.1); border-radius: 12px;
@@ -271,34 +294,113 @@ function sevBadge(sev) { return '<span class="badge sev-' + esc(sev) + '">' + es
 function card(label, value) {
   return '<div class="card"><div class="label">' + esc(label) + '</div><div class="value">' + esc(value) + '</div></div>';
 }
+// A stat card that is itself a link into a drill-down view (#15/#17).
+function cardLink(label, value, href) {
+  return '<a class="card cardlink" href="' + esc(href) + '" data-link>' +
+    '<div class="label">' + esc(label) + '</div><div class="value">' + esc(value) + '</div></a>';
+}
+
+// Clickable severity bars → a filtered Findings list (#15). Optional repoFilter
+// scopes the drill-down to one repo (used on the repo detail page).
+function severityBars(sev, repoFilter) {
+  const maxSev = Math.max(1, ...Object.values(sev || {}));
+  const sevOrder = ["critical","high","medium","low","nit"];
+  const sevVar = { critical:"crit", high:"high", medium:"med", low:"low", nit:"nit" };
+  return sevOrder.map(s => {
+    const n = (sev && sev[s]) || 0;
+    const href = "/findings?severity=" + s + (repoFilter ? "&repo=" + encodeURIComponent(repoFilter) : "");
+    return '<a class="bar-row barlink" href="' + href + '" data-link aria-label="' + n + ' ' + s + ' findings">' +
+      sevBadge(s) +
+      '<div class="bar-track"><div class="bar-fill sev-' + s + '" style="width:' + (100*n/maxSev) + '%;background:var(--' + sevVar[s] + ')"></div></div>' +
+      '<div style="text-align:right">' + n + '</div></a>';
+  }).join("");
+}
+
+// GitHub blob deep-link for a github-pr finding (head sha + path + line).
+function ghBlobUrl(f) {
+  if (f.kind !== "github-pr" || !f.repo || !f.headSha || !f.path) return null;
+  return "https://github.com/" + f.repo + "/blob/" + f.headSha + "/" + f.path +
+    "#L" + f.line + (f.endLine ? "-L" + f.endLine : "");
+}
+
+// One finding card, linking to its review + repo + GitHub (#15).
+function findingCard(f) {
+  const gh = ghBlobUrl(f);
+  const loc = esc(f.path) + ':' + f.line + (f.endLine ? '-' + f.endLine : '');
+  const repoLink = f.kind === "github-pr"
+    ? '<a href="/repos/' + esc(f.repo) + '" data-link>' + esc(f.repo) + '</a>'
+    : esc(f.repo);
+  return '<div class="finding"><div class="head">' + sevBadge(f.severity) +
+    '<span class="badge sev-nit">' + esc(f.category) + '</span>' +
+    '<a class="title" href="/reviews/' + encodeURIComponent(f.reviewId) + '" data-link>' + esc(f.title) + '</a>' +
+    (f.verified ? '<span class="badge" style="background:rgba(55,178,77,.18);color:var(--ok)">verified</span>' : '') +
+    '</div>' +
+    '<div class="loc mono muted">' + loc +
+      ' · confidence ' + (f.confidence != null ? f.confidence.toFixed(2) : '—') + '</div>' +
+    '<div class="finding-meta muted">' + repoLink +
+      (f.prNumber != null ? ' <span class="muted">#' + f.prNumber + '</span>' : '') +
+      ' · ' + fmtTime(f.timestamp) +
+      (gh ? ' · <a href="' + esc(gh) + '" target="_blank" rel="noopener noreferrer">GitHub ↗</a>' : '') +
+    '</div></div>';
+}
+
+// Shared reviews table (used by Reviews, Overview recent, and repo detail).
+function reviewRow(r) {
+  return '<tr class="clickable" role="link" tabindex="0" data-href="/reviews/' + encodeURIComponent(r.id) + '"' +
+    ' aria-label="Open review of ' + esc(r.repo) + (r.prNumber != null ? ' PR ' + r.prNumber : '') + '">' +
+    '<td data-label="Repo">' + esc(r.repo) + (r.prNumber != null ? ' <span class="muted">#' + r.prNumber + '</span>' : '') + '</td>' +
+    '<td data-label="When" class="muted">' + fmtTime(r.timestamp) + '</td>' +
+    '<td data-label="Files">' + r.stats.filesReviewed + '</td>' +
+    '<td data-label="Findings">' + r.findingsPosted + '</td>' +
+    '<td data-label="Wall" class="muted">' + fmtMs(r.wallMs) + '</td>' +
+    '<td data-label="Head" class="mono">' + esc((r.headSha || "").slice(0,7)) + '</td></tr>';
+}
+function reviewsTable(records, emptyMsg) {
+  const rows = records.length ? records.map(reviewRow).join("")
+    : '<tr><td colspan="6" class="empty">' + esc(emptyMsg) + '</td></tr>';
+  return '<table><thead><tr><th scope="col">Repo</th><th scope="col">When</th>' +
+    '<th scope="col">Files</th><th scope="col">Findings</th><th scope="col">Wall</th>' +
+    '<th scope="col">Head</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
 
 // ─────────────────────────────── views ───────────────────────────────
 // Each view is an async fn returning { html, wire? }. render() shows a
 // skeleton, awaits the fn, and (if not superseded) commits its html.
 
 async function renderOverview() {
-  const o = await api("/api/overview");
+  // Signal-first (#17): totals are a compact clickable strip; the body is recent
+  // activity + attention-worthy findings you can click straight into.
+  const [o, recent, allFindings] = await Promise.all([
+    api("/api/overview"),
+    api("/api/reviews?limit=6"),
+    api("/api/findings"),
+  ]);
   const sev = o.totalFindings.bySeverity;
-  const maxSev = Math.max(1, ...Object.values(sev));
-  const sevOrder = ["critical","high","medium","low","nit"];
-  const sevVar = { critical:"crit", high:"high", medium:"med", low:"low", nit:"nit" };
-  const bars = sevOrder.map(s =>
-    '<div class="bar-row">' + sevBadge(s) +
-    '<div class="bar-track"><div class="bar-fill sev-' + s + '" style="width:' + (100*(sev[s]||0)/maxSev) + '%;background:var(--' + sevVar[s] + ')"></div></div>' +
-    '<div style="text-align:right">' + (sev[s]||0) + '</div></div>'
-  ).join("");
+
+  // Attention: newest critical/high findings (api returns newest-first).
+  const attention = (allFindings.findings || [])
+    .filter(f => f.severity === "critical" || f.severity === "high")
+    .slice(0, 6);
+  const attentionHtml = attention.length
+    ? attention.map(findingCard).join("")
+    : '<div class="empty">No critical or high findings — nothing needs attention. 🎉</div>';
+
+  const recentHtml = reviewsTable(recent.records || [], "No reviews recorded yet.");
 
   const html =
     '<h2>Overview</h2>' +
     '<div class="cards">' +
-      card("Total reviews", o.totalReviews) +
-      card("Findings posted", o.findingsPosted) +
-      card("Findings (raw)", o.findingsRaw) +
+      cardLink("Total reviews", o.totalReviews, "/reviews") +
+      cardLink("Findings posted", o.findingsPosted, "/findings") +
+      cardLink("Watched repos", o.watchedRepos, "/repos") +
       card("Mean wall time", fmtMs(o.meanWallMs)) +
-      card("Watched repos", o.watchedRepos) +
       card("Last review", o.lastReviewAt ? fmtTime(o.lastReviewAt) : "—") +
     '</div>' +
-    '<div class="panel"><h3>Findings by severity</h3><div class="bars">' + bars + '</div></div>' +
+    '<div class="panel"><h3>Needs attention <span class="muted" style="text-transform:none;letter-spacing:0">— recent critical / high</span></h3>' + attentionHtml + '</div>' +
+    '<div class="panel"><h3>Recent reviews</h3>' + recentHtml +
+      (o.totalReviews > (recent.records || []).length ? '<div style="margin-top:10px"><a href="/reviews" data-link>View all reviews →</a></div>' : '') +
+    '</div>' +
+    '<div class="panel"><h3>Findings by severity <span class="muted" style="text-transform:none;letter-spacing:0">— click to drill down</span></h3><div class="bars">' + severityBars(sev) + '</div></div>' +
     '<div class="panel"><h3>Reviews over time</h3>' + reviewsChart(o.reviewsOverTime || []) + '</div>';
   return { html };
 }
@@ -350,30 +452,126 @@ function reviewsChart(series) {
 
 async function renderRepos() {
   const { repos } = await api("/api/repos");
-  const rows = repos.length ? repos.map(r =>
-    '<tr><td data-label="Repo">' + esc(r.repo) + (r.watched ? '' : ' <span class="muted">(unwatched)</span>') + '</td>' +
-    '<td data-label="Reviews">' + r.reviewCount + '</td>' +
-    '<td data-label="Last review" class="muted">' + fmtTime(r.lastReviewAt) + '</td></tr>'
-  ).join("") : '<tr><td colspan="3" class="empty">No repositories watched yet.</td></tr>';
+  const rows = repos.length ? repos.map(r => {
+    const parts = String(r.repo).split("/");
+    const linkable = parts.length === 2 && parts[0] && parts[1]; // owner/name → detail page
+    const open = linkable
+      ? '<tr class="clickable" role="link" tabindex="0" data-href="/repos/' + esc(r.repo) + '" aria-label="Open ' + esc(r.repo) + '">'
+      : '<tr>';
+    return open + '<td data-label="Repo">' + esc(r.repo) + (r.watched ? '' : ' <span class="muted">(unwatched)</span>') + '</td>' +
+      '<td data-label="Reviews">' + r.reviewCount + '</td>' +
+      '<td data-label="Last review" class="muted">' + fmtTime(r.lastReviewAt) + '</td></tr>';
+  }).join("") : '<tr><td colspan="3" class="empty">No repositories watched yet.</td></tr>';
   const html = '<h2>Repositories</h2><div class="panel"><table>' +
     '<thead><tr><th scope="col">Repo</th><th scope="col">Reviews</th><th scope="col">Last review</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
   return { html };
 }
 
+// #16 + #19 — per-repo detail: aggregate stats, its reviews, watched status,
+// last activity, and the effective (read-only) config Warren applies to it.
+async function renderRepoDetail(owner, name) {
+  let d;
+  const label = owner + "/" + name;
+  try {
+    d = await api("/api/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(name));
+  } catch (e) {
+    if (e.message === "not_found") {
+      return { html: backLink("/repos", "← Back to repos") +
+        '<div class="empty"><h2>Repo not found</h2><p class="muted">No watched repo or review history for <span class="mono">' + esc(label) + '</span>.</p></div>' };
+    }
+    throw e;
+  }
+
+  const cards =
+    '<div class="cards">' +
+      cardLink("Reviews", d.reviewCount, "/reviews?repo=" + encodeURIComponent(d.repo)) +
+      cardLink("Findings posted", d.findingsPosted, "/findings?repo=" + encodeURIComponent(d.repo)) +
+      card("Mean wall", fmtMs(d.meanWallMs)) +
+      card("Last review", d.lastReviewAt ? fmtTime(d.lastReviewAt) : "—") +
+      card("Watched", d.watched ? "yes" : "no") +
+    '</div>';
+
+  const html =
+    backLink("/repos", "← Back to repos") +
+    '<h2>' + esc(d.repo) + (d.watched ? '' : ' <span class="muted">(unwatched)</span>') +
+      ' <a class="muted" style="font-size:13px;font-weight:400" href="https://github.com/' + esc(d.repo) + '" target="_blank" rel="noopener noreferrer">GitHub ↗</a></h2>' +
+    cards +
+    '<div class="panel"><h3>Findings by severity <span class="muted" style="text-transform:none;letter-spacing:0">— click to drill down</span></h3><div class="bars">' + severityBars(d.totalFindings.bySeverity, d.repo) + '</div></div>' +
+    configPanel(d.config) +
+    '<div class="panel"><h3>Reviews</h3>' + reviewsTable(d.reviews || [], "No reviews recorded for this repo yet.") + '</div>';
+  return { html };
+}
+
+// #19 — read-only projection of the effective config Warren applies to a repo.
+function configPanel(c) {
+  const authors = (c.autoReview.authors || []);
+  const rows = [
+    ["Review model", c.model],
+    ["Min severity", c.minSeverity],
+    ["Profile", c.profile],
+    ["Auto-review", c.autoReview.enabled ? "enabled" : "disabled"],
+    ["Review drafts", c.autoReview.drafts ? "yes" : "no"],
+    ["Base branches", (c.autoReview.baseBranches || []).join(", ") || "—"],
+    ["Author allowlist", authors.length ? authors.join(", ") : "all authors"],
+    ["Path filters", (c.pathFilters || []).join("  ") || "—"],
+    ["Resolve on fix", c.resolveOnFix ? "yes" : "no"],
+    ["Walkthrough", "diagrams " + (c.walkthrough.sequenceDiagrams ? "on" : "off") + " · poem " + (c.walkthrough.poem ? "on" : "off")],
+    ["Triage / verify", (c.models.triage || "—") + "  ·  " + (c.models.verify || "—")],
+  ];
+  let dl = rows.map(([k, v]) =>
+    '<div class="cfg-row"><div class="cfg-k">' + esc(k) + '</div><div class="cfg-v mono">' + esc(v) + '</div></div>'
+  ).join("");
+  const pi = c.pathInstructions || [];
+  if (pi.length) {
+    dl += '<div class="cfg-row"><div class="cfg-k">Path instructions</div><div class="cfg-v">' +
+      pi.map(p => '<div class="pi"><span class="mono">' + esc(p.path) + '</span> <span class="muted">— ' + esc(p.instructions) + '</span></div>').join("") +
+      '</div></div>';
+  }
+  return '<div class="panel"><h3>Effective config <span class="muted" style="text-transform:none;letter-spacing:0">(read-only)</span></h3>' + dl + '</div>';
+}
+
+// #15 — flat, filtered findings list. Filters come from the query string
+// (?severity=&repo=&verified=) so it is deep-linkable from Overview drill-downs.
+async function renderFindings() {
+  const params = new URLSearchParams(location.search);
+  const severity = params.get("severity") || "";
+  const repo = params.get("repo") || "";
+  const verified = params.get("verified") || "";
+  const qp = [];
+  if (severity) qp.push("severity=" + encodeURIComponent(severity));
+  if (repo) qp.push("repo=" + encodeURIComponent(repo));
+  if (verified) qp.push("verified=" + encodeURIComponent(verified));
+  const { findings, total } = await api("/api/findings" + (qp.length ? "?" + qp.join("&") : ""));
+
+  const active = [];
+  if (severity) active.push("severity " + sevBadge(severity));
+  if (repo) active.push('repo <a href="/repos/' + esc(repo) + '" data-link class="mono">' + esc(repo) + '</a>');
+  if (verified) active.push("verified: " + esc(verified));
+  const filterbar = active.length
+    ? '<div class="filterbar muted">Filtered by ' + active.join(", ") + ' · <a href="/findings" data-link>clear</a></div>'
+    : '<div class="filterbar muted">All findings across every review.</div>';
+
+  const body = findings.length
+    ? findings.map(findingCard).join("")
+    : '<div class="empty">No findings match this filter.</div>';
+
+  const html =
+    '<a class="back" href="/" data-link>← Back to overview</a>' +
+    '<h2>Findings <span class="muted">(' + total + ')</span></h2>' +
+    filterbar +
+    '<div class="panel">' + body + '</div>';
+  return { html };
+}
+
 async function renderReviews() {
-  const { records, total } = await api("/api/reviews?limit=100");
-  const rows = records.length ? records.map(r =>
-    '<tr class="clickable" role="link" tabindex="0" data-href="/reviews/' + encodeURIComponent(r.id) + '"' +
-    ' aria-label="Open review of ' + esc(r.repo) + (r.prNumber != null ? ' PR ' + r.prNumber : '') + '">' +
-    '<td data-label="Repo">' + esc(r.repo) + (r.prNumber != null ? ' <span class="muted">#' + r.prNumber + '</span>' : '') + '</td>' +
-    '<td data-label="When" class="muted">' + fmtTime(r.timestamp) + '</td>' +
-    '<td data-label="Files">' + r.stats.filesReviewed + '</td>' +
-    '<td data-label="Findings">' + r.findingsPosted + '</td>' +
-    '<td data-label="Wall" class="muted">' + fmtMs(r.wallMs) + '</td>' +
-    '<td data-label="Head" class="mono">' + esc((r.headSha || "").slice(0,7)) + '</td></tr>'
-  ).join("") : '<tr><td colspan="6" class="empty">No reviews recorded yet.</td></tr>';
-  const html = '<h2>Reviews <span class="muted">(' + total + ')</span></h2><div class="panel"><table>' +
-    '<thead><tr><th scope="col">Repo</th><th scope="col">When</th><th scope="col">Files</th><th scope="col">Findings</th><th scope="col">Wall</th><th scope="col">Head</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  const params = new URLSearchParams(location.search);
+  const repo = params.get("repo") || "";
+  const { records, total } = await api("/api/reviews?limit=100" + (repo ? "&repo=" + encodeURIComponent(repo) : ""));
+  const filterbar = repo
+    ? '<div class="filterbar muted">Filtered by repo <a href="/repos/' + esc(repo) + '" data-link class="mono">' + esc(repo) + '</a> · <a href="/reviews" data-link>clear</a></div>'
+    : "";
+  const html = '<h2>Reviews <span class="muted">(' + total + ')</span></h2>' + filterbar +
+    '<div class="panel">' + reviewsTable(records || [], "No reviews recorded yet.") + '</div>';
   return { html };
 }
 
@@ -415,8 +613,8 @@ async function renderReviewDetail(id) {
   return { html };
 }
 
-function backLink() {
-  return '<a class="back" href="/reviews" data-link>← Back to reviews</a>';
+function backLink(href, label) {
+  return '<a class="back" href="' + (href || "/reviews") + '" data-link>' + (label || "← Back to reviews") + '</a>';
 }
 
 // ─────────────────────────────── skeletons ───────────────────────────────
@@ -441,16 +639,21 @@ function skDetail() {
 }
 
 // ─────────────────────────────── router ───────────────────────────────
-// Room is left for /repos/:owner/:name and /findings that later tickets add.
 const routes = [
   { name: "overview", re: /^\/$/, load: renderOverview, skeleton: () => skOverview() },
   { name: "repos", re: /^\/repos\/?$/, load: renderRepos, skeleton: () => skList("Repositories") },
+  { name: "repoDetail", re: /^\/repos\/([^/]+)\/([^/]+)\/?$/, load: (m) => renderRepoDetail(decodeURIComponent(m[1]), decodeURIComponent(m[2])), skeleton: () => skDetail() },
+  { name: "findings", re: /^\/findings\/?$/, load: renderFindings, skeleton: () => skList("Findings") },
   { name: "reviews", re: /^\/reviews\/?$/, load: renderReviews, skeleton: () => skList("Reviews") },
   { name: "reviewDetail", re: /^\/reviews\/([^/]+)\/?$/, load: (m) => renderReviewDetail(decodeURIComponent(m[1])), skeleton: () => skDetail() },
 ];
 
-/** Nav highlight key for a route (detail rolls up under Reviews). */
-function navKeyFor(name) { return name === "reviewDetail" ? "reviews" : name; }
+/** Nav highlight key for a route (detail views roll up under their section). */
+function navKeyFor(name) {
+  if (name === "reviewDetail") return "reviews";
+  if (name === "repoDetail") return "repos";
+  return name; // "findings" matches no nav item → no highlight (reached from Overview)
+}
 
 function matchRoute(path) {
   for (const r of routes) { const m = r.re.exec(path); if (m) return { route: r, m }; }
