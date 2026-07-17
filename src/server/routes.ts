@@ -6,8 +6,9 @@
 import type { FastifyInstance } from "fastify";
 
 import type { WarrenApp } from "../container.js";
+import { resolveRepoConfig } from "../config/load.js";
 import type { HistoryRecord } from "../state/history.js";
-import type { Severity } from "../types.js";
+import type { Severity, WarrenConfig } from "../types.js";
 import {
   repoLabel,
   targetKey,
@@ -24,6 +25,31 @@ function zeroSeverityCounts(): Record<Severity, number> {
 /** UTC day (YYYY-MM-DD) for a record's timestamp, for the time series. */
 function dayOf(iso: string): string {
   return iso.slice(0, 10);
+}
+
+/**
+ * Read-only, secret-free projection of a repo's effective config for the
+ * dashboard (#19). Deliberately curated: exposes review model + the aggression /
+ * filtering / auto-review knobs Warren actually applies, and NEVER any token or
+ * the nested `repos` list.
+ */
+function effectiveConfigView(cfg: WarrenConfig) {
+  return {
+    profile: cfg.profile,
+    minSeverity: cfg.minSeverity,
+    model: cfg.models.review,
+    models: cfg.models,
+    autoReview: {
+      enabled: cfg.autoReview.enabled,
+      drafts: cfg.autoReview.drafts,
+      baseBranches: cfg.autoReview.baseBranches,
+      authors: cfg.autoReview.authors,
+    },
+    pathFilters: cfg.pathFilters,
+    pathInstructions: cfg.pathInstructions,
+    walkthrough: cfg.walkthrough,
+    resolveOnFix: cfg.resolveOnFix,
+  };
 }
 
 interface ManualReviewBody {
@@ -154,6 +180,99 @@ export function registerRoutes(server: FastifyInstance, app: WarrenApp): void {
       return { error: "not found" };
     }
     return record;
+  });
+
+  // Flattened findings across all history records, newest-first, with the
+  // review context needed to link each one back to its review (+ GitHub). Filters:
+  //   ?severity=critical|high|medium|low|nit  ?repo=owner/name  ?verified=true|false
+  server.get("/api/findings", async (request) => {
+    const q = request.query as Record<string, string | undefined>;
+    const severity = q.severity?.trim() || undefined;
+    const repo = q.repo?.trim() || undefined;
+    const verified =
+      q.verified === "true" ? true : q.verified === "false" ? false : undefined;
+
+    const records = await app.history.all(); // newest-first
+    const findings = [];
+    for (const r of records) {
+      if (repo && r.repo !== repo) continue;
+      for (const f of r.findings) {
+        if (severity && f.severity !== severity) continue;
+        if (verified !== undefined && f.verified !== verified) continue;
+        findings.push({
+          ...f,
+          reviewId: r.id,
+          repo: r.repo,
+          kind: r.kind,
+          prNumber: r.prNumber ?? null,
+          headSha: r.headSha,
+          timestamp: r.timestamp,
+        });
+      }
+    }
+    return { total: findings.length, findings };
+  });
+
+  // Per-repo detail: aggregate stats, review history, watched status, and the
+  // effective (read-only) config Warren applies to it (#16 + #19). 404 when the
+  // repo is neither watched nor present in history.
+  server.get("/api/repos/:owner/:name", async (request, reply) => {
+    const { owner, name } = request.params as { owner: string; name: string };
+    const label = `${owner}/${name}`;
+
+    const records = await app.history.all(); // newest-first
+    const repoRecords = records.filter((r) => r.repo === label);
+
+    const watchedRepo = app.repos.find(
+      (rc) => rc.github?.owner === owner && rc.github?.name === name,
+    );
+    const watched = Boolean(watchedRepo);
+
+    if (!watched && repoRecords.length === 0) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+
+    const bySeverity = zeroSeverityCounts();
+    let findingsPosted = 0;
+    let totalWallMs = 0;
+    for (const r of repoRecords) {
+      findingsPosted += r.stats.findingsPosted;
+      totalWallMs += r.wallMs;
+      for (const f of r.findings) bySeverity[f.severity] += 1;
+    }
+
+    // Review summaries (findings + walkthrough stripped), newest-first.
+    const reviews = repoRecords.map((r) => {
+      const { findings: _f, walkthrough: _w, ...rest } = r;
+      void _f;
+      void _w;
+      return { ...rest, findingsPosted: r.stats.findingsPosted };
+    });
+
+    const effective = watchedRepo
+      ? resolveRepoConfig(app.config, watchedRepo)
+      : app.config;
+
+    return {
+      repo: label,
+      owner,
+      name,
+      watched,
+      reviewCount: repoRecords.length,
+      lastReviewAt: repoRecords[0]?.timestamp ?? null,
+      firstReviewAt: repoRecords[repoRecords.length - 1]?.timestamp ?? null,
+      totalFindings: {
+        total: SEVERITIES.reduce((n, s) => n + bySeverity[s], 0),
+        bySeverity,
+      },
+      findingsPosted,
+      meanWallMs: repoRecords.length
+        ? Math.round(totalWallMs / repoRecords.length)
+        : 0,
+      reviews,
+      config: effectiveConfigView(effective),
+    };
   });
 
   // Enqueue a manual review. Body is a full ReviewTarget, {target}, or {repo, prNumber}.

@@ -149,4 +149,128 @@ describe("dashboard API", () => {
     expect(miss.statusCode).toBe(404);
     await server.close();
   });
+
+  it("GET /api/findings flattens findings across reviews with review context", async () => {
+    const { app, history } = makeFakeApp({ dataDir });
+    await history.append(
+      ghResult({
+        owner: "acme",
+        name: "a",
+        pr: 1,
+        findings: [makeFinding({ severity: "critical" }), makeFinding({ severity: "low" })],
+      }),
+    );
+    await history.append(
+      ghResult({ owner: "acme", name: "b", pr: 2, findings: [makeFinding({ severity: "critical" })] }),
+    );
+    const server = createServer(app);
+
+    const all = await server.inject({ method: "GET", url: "/api/findings" });
+    expect(all.statusCode).toBe(200);
+    expect(all.json().total).toBe(3);
+    // Newest-first: repo b's review comes first, carries its review context.
+    const first = all.json().findings[0];
+    expect(first.repo).toBe("acme/b");
+    expect(first.reviewId).toBeTruthy();
+    expect(first.prNumber).toBe(2);
+    expect(first.headSha).toBeTruthy();
+
+    await server.close();
+  });
+
+  it("GET /api/findings filters by severity, repo, and verified", async () => {
+    const { app, history } = makeFakeApp({ dataDir });
+    await history.append(
+      ghResult({
+        owner: "acme",
+        name: "a",
+        pr: 1,
+        findings: [
+          makeFinding({ severity: "critical", verified: true }),
+          makeFinding({ severity: "low", verified: false }),
+        ],
+      }),
+    );
+    await history.append(
+      ghResult({ owner: "acme", name: "b", pr: 2, findings: [makeFinding({ severity: "critical", verified: true })] }),
+    );
+    const server = createServer(app);
+
+    const crit = await server.inject({ method: "GET", url: "/api/findings?severity=critical" });
+    expect(crit.json().total).toBe(2);
+
+    const byRepo = await server.inject({ method: "GET", url: "/api/findings?repo=acme/a" });
+    expect(byRepo.json().total).toBe(2);
+
+    const critByRepo = await server.inject({ method: "GET", url: "/api/findings?severity=critical&repo=acme/a" });
+    expect(critByRepo.json().total).toBe(1);
+
+    const unverified = await server.inject({ method: "GET", url: "/api/findings?verified=false" });
+    expect(unverified.json().total).toBe(1);
+    expect(unverified.json().findings[0].severity).toBe("low");
+
+    await server.close();
+  });
+
+  it("GET /api/repos/:owner/:name returns aggregate stats, reviews, and effective config", async () => {
+    const { app, history } = makeFakeApp({
+      dataDir,
+      repos: [
+        {
+          github: { owner: "acme", name: "widgets" },
+          overrides: { minSeverity: "high", profile: "assertive" },
+        },
+      ],
+    });
+    await history.append(
+      ghResult({ owner: "acme", name: "widgets", pr: 1, findings: [makeFinding({ severity: "critical" })] }),
+    );
+    await history.append(
+      ghResult({ owner: "acme", name: "widgets", pr: 2, findings: [makeFinding({ severity: "high" })] }),
+    );
+    const server = createServer(app);
+
+    const res = await server.inject({ method: "GET", url: "/api/repos/acme/widgets" });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.repo).toBe("acme/widgets");
+    expect(body.watched).toBe(true);
+    expect(body.reviewCount).toBe(2);
+    expect(body.lastReviewAt).not.toBeNull();
+    expect(body.totalFindings.total).toBe(2);
+    expect(body.totalFindings.bySeverity.critical).toBe(1);
+    expect(body.reviews).toHaveLength(2);
+    // Reviews are summaries (findings stripped), newest-first.
+    expect(body.reviews[0].prNumber).toBe(2);
+    expect(body.reviews[0].findings).toBeUndefined();
+    // Effective config reflects the per-repo overrides (#19), never a token.
+    expect(body.config.minSeverity).toBe("high");
+    expect(body.config.profile).toBe("assertive");
+    expect(body.config.model).toBeTruthy();
+    expect(JSON.stringify(body.config)).not.toContain("token");
+
+    await server.close();
+  });
+
+  it("GET /api/repos/:owner/:name works for an unwatched repo that has history", async () => {
+    const { app, history } = makeFakeApp({ dataDir, repos: [] });
+    await history.append(ghResult({ owner: "acme", name: "orphan", pr: 9 }));
+    const server = createServer(app);
+
+    const res = await server.inject({ method: "GET", url: "/api/repos/acme/orphan" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().watched).toBe(false);
+    expect(res.json().reviewCount).toBe(1);
+    expect(res.json().config.model).toBeTruthy();
+
+    await server.close();
+  });
+
+  it("GET /api/repos/:owner/:name 404s for an unknown, historyless repo", async () => {
+    const { app } = makeFakeApp({ dataDir, repos: [] });
+    const server = createServer(app);
+    const res = await server.inject({ method: "GET", url: "/api/repos/nobody/nothing" });
+    expect(res.statusCode).toBe(404);
+    await server.close();
+  });
 });

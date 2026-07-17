@@ -3,6 +3,7 @@
 
 import type { WarrenApp } from "../src/container.js";
 import type { WarrenAuthConfig } from "../src/config/env.js";
+import { defaultWarrenConfig } from "../src/config/load.js";
 import { createReviewHistoryStore, type ReviewHistoryStore } from "../src/state/history.js";
 import type { Finding, Logger, ReviewResult, ReviewTarget } from "../src/types.js";
 
@@ -69,6 +70,8 @@ export interface FakeAppOptions {
   dataDir: string;
   auth?: WarrenAuthConfig;
   repos?: WarrenApp["repos"];
+  /** Per-repo config overrides merged into the fake server config's `repos`. */
+  config?: Partial<WarrenApp["config"]>;
 }
 
 /** Build a fake WarrenApp with a real history store; other deps are stubs. */
@@ -78,10 +81,15 @@ export function makeFakeApp(opts: FakeAppOptions): {
 } {
   const history = createReviewHistoryStore(opts.dataDir);
   const auth: WarrenAuthConfig = opts.auth ?? { mode: "none" };
+  const repos = opts.repos ?? [{ github: { owner: "acme", name: "widgets" } }];
+  // A real (all-defaults) WarrenConfig so resolveRepoConfig / effective-config
+  // endpoints (#19) work; `repos` mirrors the watched list so per-repo overrides
+  // resolve. Callers can pass `config` to override top-level fields.
+  const config = { ...defaultWarrenConfig(), repos, ...(opts.config ?? {}) };
   const app = {
     history,
     dataDir: opts.dataDir,
-    repos: opts.repos ?? [{ github: { owner: "acme", name: "widgets" } }],
+    repos,
     logger: silentLogger,
     env: {
       githubToken: undefined,
@@ -94,9 +102,7 @@ export function makeFakeApp(opts: FakeAppOptions): {
       dataDir: opts.dataDir,
       auth,
     },
-    config: {
-      trigger: { mode: "poll", pollIntervalMs: 60000 },
-    },
+    config,
     queue: { activeCount: () => 0 },
     clientFor: () => null,
   } as unknown as WarrenApp;
