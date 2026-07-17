@@ -42,7 +42,7 @@ function makeConfig(over: Partial<WarrenConfig> = {}): WarrenConfig {
     profile: "chill",
     minSeverity: "low",
     trigger: { mode: "poll", pollIntervalMs: 60000 },
-    autoReview: { enabled: true, drafts: false, baseBranches: ["main"] },
+    autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: [] },
     pathFilters: [],
     pathInstructions: [],
     walkthrough: { sequenceDiagrams: false, poem: false },

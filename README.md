@@ -182,6 +182,7 @@ commented starter. Keys are snake_case on disk.
 | `auto_review.enabled` | `true` | Auto-review open PRs (vs. `@warren`-only). |
 | `auto_review.drafts` | `false` | Also review draft PRs. |
 | `auto_review.base_branches` | `[main]` | Only auto-review PRs targeting these branches. |
+| `auto_review.authors` | `[]` | **Safety allowlist** of PR author logins (case-insensitive). Empty = review everyone; when set, only these authors' PRs are reviewed/commented on (also gates `@warren` commands). |
 | `path_filters` | excludes `dist`/lockfiles/`node_modules` | Globs of files to review; `!` excludes. |
 | `path_instructions` | `[]` | Extra `{ path, instructions }` guidance for the agent. |
 | `walkthrough.sequence_diagrams` | `false` | Add sequence diagrams to the walkthrough. |

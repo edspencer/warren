@@ -70,6 +70,11 @@ const WarrenConfigRawZ = z.object({
       enabled: z.boolean().default(true),
       drafts: z.boolean().default(false),
       base_branches: z.array(z.string()).default(["main"]),
+      // Author allowlist (case-insensitive). Empty (default) = review everyone.
+      // When set, only PRs by these logins are auto-reviewed/commented on, and
+      // @warren commands on other authors' PRs are ignored. Safety guard so a
+      // fresh install can be scoped to just the owner's own login while testing.
+      authors: z.array(z.string()).default([]),
     })
     .default({}),
   path_filters: z
@@ -164,6 +169,7 @@ export function toWarrenConfig(raw: WarrenConfigRaw): WarrenConfig {
       enabled: raw.auto_review.enabled,
       drafts: raw.auto_review.drafts,
       baseBranches: raw.auto_review.base_branches,
+      authors: raw.auto_review.authors,
     },
     pathFilters: raw.path_filters,
     pathInstructions: raw.path_instructions.map((p) => ({
