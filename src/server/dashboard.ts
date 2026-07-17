@@ -114,7 +114,48 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   .finding .title { font-weight: 600; }
   .finding .loc { margin-top: 4px; }
   .finding .body { margin-top: 8px; white-space: pre-wrap; }
-  .md { white-space: pre-wrap; }
+
+  /* PR link on the review-detail header (#14). */
+  .prlink { margin: -8px 0 4px; }
+  .prlink a { font-weight: 600; }
+  .prlink .state { margin-left: 6px; }
+
+  /* Suggested-change block on a finding (#18) — GitHub suggestion-block style. */
+  .suggestion { margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .suggestion .sg-label {
+    background: rgba(55,178,77,.14); color: var(--ok); font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .3px; padding: 5px 10px; border-bottom: 1px solid var(--border);
+  }
+  .suggestion pre { margin: 0; }
+  .suggestion pre code { display: block; }
+  .badge.unverified { background: rgba(134,142,150,.2); color: var(--nit); }
+
+  /* ---------- Markdown (#18) — summary/walkthrough rendered as real HTML ---------- */
+  .md { line-height: 1.55; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p { margin: 0 0 10px; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 16px 0 8px; line-height: 1.3; }
+  .md h1 { font-size: 19px; } .md h2 { font-size: 17px; } .md h3 { font-size: 15px; }
+  .md h4, .md h5, .md h6 { font-size: 14px; color: var(--muted); }
+  .md ul, .md ol { margin: 0 0 10px; padding-left: 22px; }
+  .md li { margin: 2px 0; }
+  .md a { text-decoration: underline; }
+  .md code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px;
+  }
+  .md pre.md-code, .suggestion pre.md-code {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; overflow-x: auto; margin: 0 0 10px;
+  }
+  .md pre.md-code code, .suggestion pre.md-code code {
+    background: none; border: 0; padding: 0; font-size: 12.5px; white-space: pre;
+  }
+  .md blockquote {
+    margin: 0 0 10px; padding: 2px 12px; border-left: 3px solid var(--border); color: var(--muted);
+  }
+  .md hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
   .empty { color: var(--muted); padding: 28px 20px; text-align: center; }
   .empty h2 { color: var(--text); }
 
@@ -346,9 +387,17 @@ function findingCard(f) {
 
 // Shared reviews table (used by Reviews, Overview recent, and repo detail).
 function reviewRow(r) {
+  // #14 — expose the PR link on the row (the "#N" becomes a GitHub ↗ link when the
+  // record is a github-pr); the row still navigates to the detail view (the click
+  // handler lets real anchors through).
+  const pr = prUrl(r);
+  const repoCell = esc(r.repo) +
+    (r.prNumber != null
+      ? ' ' + (pr ? extLink(pr, '#' + r.prNumber + ' ↗') : '<span class="muted">#' + r.prNumber + '</span>')
+      : '');
   return '<tr class="clickable" role="link" tabindex="0" data-href="/reviews/' + encodeURIComponent(r.id) + '"' +
     ' aria-label="Open review of ' + esc(r.repo) + (r.prNumber != null ? ' PR ' + r.prNumber : '') + '">' +
-    '<td data-label="Repo">' + esc(r.repo) + (r.prNumber != null ? ' <span class="muted">#' + r.prNumber + '</span>' : '') + '</td>' +
+    '<td data-label="Repo">' + repoCell + '</td>' +
     '<td data-label="When" class="muted">' + fmtTime(r.timestamp) + '</td>' +
     '<td data-label="Files">' + r.stats.filesReviewed + '</td>' +
     '<td data-label="Findings">' + r.findingsPosted + '</td>' +
@@ -361,6 +410,87 @@ function reviewsTable(records, emptyMsg) {
   return '<table><thead><tr><th scope="col">Repo</th><th scope="col">When</th>' +
     '<th scope="col">Files</th><th scope="col">Findings</th><th scope="col">Wall</th>' +
     '<th scope="col">Head</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+// ───────────────────────── GitHub links (#14) ─────────────────────────
+// A record links to GitHub only when it's a github-pr with an "owner/name" repo.
+function isGithub(r) { return r && r.kind === "github-pr" && /^[^/\s]+\/[^/\s]+$/.test(r.repo || ""); }
+function prUrl(r) { return isGithub(r) && r.prNumber != null ? "https://github.com/" + r.repo + "/pull/" + r.prNumber : null; }
+// Exact code location: blob@headSha/path#Lline(-Lend). Falls back to the PR
+// files view (no headSha) so a finding always resolves somewhere useful.
+function findingUrl(r, f) {
+  if (!isGithub(r) || !f || !f.path) return null;
+  const p = String(f.path).split("/").map(encodeURIComponent).join("/");
+  if (r.headSha) {
+    let u = "https://github.com/" + r.repo + "/blob/" + r.headSha + "/" + p;
+    if (f.line) u += "#L" + f.line + (f.endLine && f.endLine > f.line ? "-L" + f.endLine : "");
+    return u;
+  }
+  return prUrl(r) ? prUrl(r) + "/files" : null;
+}
+function extLink(href, text) {
+  return '<a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+}
+
+// ───────────────────────── Markdown (#18) ─────────────────────────
+// Tiny, dependency-free, XSS-safe markdown→HTML for summary/walkthrough. Block
+// structure is parsed from raw lines; every text segment is esc()'d before any
+// tags are inserted, and links are restricted to http(s)/relative/anchor hrefs.
+function mdInline(raw) {
+  let s = esc(raw);
+  s = s.replace(/\`([^\`]+)\`/g, (_, c) => "<code>" + c + "</code>");
+  s = s.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/__([^_]+?)__/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, t, u) =>
+    /^(https?:\/\/|\/|#)/.test(u) ? '<a href="' + u.replace(/"/g, "%22") + '" target="_blank" rel="noopener noreferrer">' + t + "</a>" : m,
+  );
+  return s;
+}
+function mdToHtml(src) {
+  if (src == null || src === "") return "";
+  const lines = String(src).replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let para = [], list = null, i = 0;
+  const flushPara = () => { if (para.length) { out.push("<p>" + para.map(mdInline).join("<br>") + "</p>"); para = []; } };
+  const flushList = () => {
+    if (list) { out.push("<" + list.type + ">" + list.items.map(it => "<li>" + mdInline(it) + "</li>").join("") + "</" + list.type + ">"); list = null; }
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = /^\s*\`\`\`/.test(line);
+    if (fence) {
+      flushPara(); flushList();
+      const body = []; i++;
+      while (i < lines.length && !/^\s*\`\`\`/.test(lines[i])) { body.push(lines[i]); i++; }
+      i++; // closing fence
+      out.push('<pre class="md-code"><code>' + esc(body.join("\n")) + "</code></pre>");
+      continue;
+    }
+    const h = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (h) { flushPara(); flushList(); const lvl = h[1].length; out.push("<h" + lvl + ">" + mdInline(h[2]) + "</h" + lvl + ">"); i++; continue; }
+    const bq = /^>\s?(.*)$/.exec(line);
+    if (bq) {
+      flushPara(); flushList();
+      const body = [bq[1]]; i++;
+      while (i < lines.length && /^>\s?(.*)$/.test(lines[i])) { body.push(/^>\s?(.*)$/.exec(lines[i])[1]); i++; }
+      out.push("<blockquote>" + body.map(mdInline).join("<br>") + "</blockquote>");
+      continue;
+    }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flushPara(); flushList(); out.push("<hr>"); i++; continue; }
+    const ul = /^\s*[-*+]\s+(.*)$/.exec(line);
+    const ol = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (ul || ol) {
+      flushPara();
+      const type = ul ? "ul" : "ol";
+      if (!list || list.type !== type) { flushList(); list = { type, items: [] }; }
+      list.items.push(ul ? ul[1] : ol[1]); i++; continue;
+    }
+    if (line.trim() === "") { flushPara(); flushList(); i++; continue; }
+    para.push(line); i++;
+  }
+  flushPara(); flushList();
+  return out.join("");
 }
 
 // ─────────────────────────────── views ───────────────────────────────
@@ -585,20 +715,33 @@ async function renderReviewDetail(id) {
     }
     throw e;
   }
-  const findings = (r.findings || []).map(f =>
-    '<div class="finding"><div class="head">' + sevBadge(f.severity) +
-    '<span class="badge sev-nit">' + esc(f.category) + '</span>' +
-    '<span class="title">' + esc(f.title) + '</span>' +
-    (f.verified ? '<span class="badge" style="background:rgba(55,178,77,.18);color:var(--ok)">verified</span>' : '') +
-    '</div>' +
-    '<div class="loc mono muted">' + esc(f.path) + ':' + f.line + (f.endLine ? '-' + f.endLine : '') +
-    ' · confidence ' + (f.confidence != null ? f.confidence.toFixed(2) : '—') + '</div>' +
-    '</div>'
-  ).join("") || '<div class="empty">No findings posted.</div>';
+  const findings = (r.findings || []).map(f => {
+    const url = findingUrl(r, f);
+    const loc = esc(f.path) + ':' + f.line + (f.endLine ? '-' + f.endLine : '');
+    const locHtml = url ? extLink(url, loc + ' ↗') : loc;
+    const verBadge = f.verified
+      ? '<span class="badge" style="background:rgba(55,178,77,.18);color:var(--ok)">verified</span>'
+      : '<span class="badge unverified">unverified</span>';
+    return '<div class="finding"><div class="head">' + sevBadge(f.severity) +
+      '<span class="badge sev-nit">' + esc(f.category) + '</span>' +
+      '<span class="title">' + esc(f.title) + '</span>' + verBadge +
+      '</div>' +
+      '<div class="loc mono muted">' + locHtml +
+      ' · confidence ' + (f.confidence != null ? f.confidence.toFixed(2) : '—') + '</div>' +
+      (f.suggestion
+        ? '<div class="suggestion"><div class="sg-label">Suggested change</div>' +
+          '<pre class="md-code"><code>' + esc(f.suggestion) + '</code></pre></div>'
+        : '') +
+      '</div>';
+  }).join("") || '<div class="empty">No findings posted.</div>';
+
+  const pr = prUrl(r);
+  const coverage = r.stats && r.stats.coverage;
 
   const html =
     backLink() +
     '<h2>' + esc(r.repo) + (r.prNumber != null ? ' #' + r.prNumber : '') + '</h2>' +
+    (pr ? '<div class="prlink">' + extLink(pr, 'View PR #' + r.prNumber + ' on GitHub ↗') + '</div>' : '') +
     '<div class="cards">' +
       card("Findings posted", r.stats.findingsPosted) +
       card("Files", r.stats.filesReviewed) +
@@ -606,9 +749,10 @@ async function renderReviewDetail(id) {
       card("Wall", fmtMs(r.wallMs)) +
       card("Model", r.model || "—") +
     '</div>' +
-    '<div class="panel"><h3>When</h3><div class="muted">' + fmtTime(r.timestamp) + ' · head <span class="mono">' + esc(r.headSha || "—") + '</span></div></div>' +
-    (r.summary ? '<div class="panel"><h3>Summary</h3><div class="md">' + esc(r.summary) + '</div></div>' : '') +
-    (r.walkthrough ? '<div class="panel"><h3>Walkthrough</h3><div class="md">' + esc(r.walkthrough) + '</div></div>' : '') +
+    '<div class="panel"><h3>When</h3><div class="muted">' + fmtTime(r.timestamp) + ' · head <span class="mono">' + esc(r.headSha || "—") + '</span></div>' +
+      (coverage ? '<div class="muted" style="margin-top:6px">' + esc(coverage) + '</div>' : '') + '</div>' +
+    (r.summary ? '<div class="panel"><h3>Summary</h3><div class="md">' + mdToHtml(r.summary) + '</div></div>' : '') +
+    (r.walkthrough ? '<div class="panel"><h3>Walkthrough</h3><div class="md">' + mdToHtml(r.walkthrough) + '</div></div>' : '') +
     '<div class="panel"><h3>Findings (' + (r.findings || []).length + ')</h3>' + findings + '</div>';
   return { html };
 }
@@ -724,6 +868,11 @@ document.addEventListener("click", e => {
 
 // Clickable table rows (role="link") — click + keyboard (Enter/Space).
 app.addEventListener("click", e => {
+  // Let real links inside a row (e.g. the GitHub PR link, #14) work natively
+  // instead of hijacking the click for row navigation. Internal data-link
+  // anchors are handled by the document-level interceptor above.
+  const link = e.target.closest && e.target.closest("a[href]");
+  if (link && app.contains(link) && !link.hasAttribute("data-link")) return;
   const el = e.target.closest && e.target.closest("[data-href]");
   if (el && app.contains(el)) { e.preventDefault(); navigate(el.getAttribute("data-href")); }
 });
