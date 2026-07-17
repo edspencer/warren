@@ -35,6 +35,38 @@ describe("dashboard API", () => {
     await server.close();
   });
 
+  it("SPA fallback: serves the shell for client routes (deep links / hard refresh)", async () => {
+    const { app } = makeFakeApp({ dataDir });
+    const server = createServer(app);
+    for (const url of ["/reviews", "/reviews/some-id", "/repos", "/repos/acme/widgets", "/findings?severity=high"]) {
+      const res = await server.inject({ method: "GET", url });
+      expect(res.statusCode, url).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/html");
+      expect(res.body).toContain("Warren");
+    }
+    await server.close();
+  });
+
+  it("SPA fallback does NOT shadow the JSON API: unknown /api/* is a JSON 404", async () => {
+    const { app } = makeFakeApp({ dataDir });
+    const server = createServer(app);
+    const res = await server.inject({ method: "GET", url: "/api/does-not-exist" });
+    expect(res.statusCode).toBe(404);
+    expect(res.headers["content-type"]).toContain("application/json");
+    await server.close();
+  });
+
+  it("SPA fallback in jwt mode: client routes stay open (no 401), API stays guarded", async () => {
+    const { app } = makeFakeApp({ dataDir, auth: { mode: "jwt", jwtSecret: "s".repeat(24) } });
+    const server = createServer(app);
+    const shell = await server.inject({ method: "GET", url: "/reviews/abc" });
+    expect(shell.statusCode).toBe(200);
+    expect(shell.headers["content-type"]).toContain("text/html");
+    const api = await server.inject({ method: "GET", url: "/api/overview" });
+    expect(api.statusCode).toBe(401);
+    await server.close();
+  });
+
   it("GET /api/overview aggregates severity counts, totals, and a time series", async () => {
     const { app, history } = makeFakeApp({ dataDir });
     await history.append(
