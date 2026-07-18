@@ -7,7 +7,7 @@
 import path from "node:path";
 
 import { readEnv, type WarrenEnv } from "./config/env.js";
-import { loadWarrenConfig, resolveRepoConfig } from "./config/load.js";
+import { loadWarrenConfig, reloadWarrenConfigInto, resolveRepoConfig } from "./config/load.js";
 import { createReviewStateStore, type ReviewStateStore } from "./state/store.js";
 import { createReviewHistoryStore, type ReviewHistoryStore } from "./state/history.js";
 import { createGitHubClient, type GitHubClient } from "./github/client.js";
@@ -48,6 +48,12 @@ export interface WarrenApp {
   env: WarrenEnv;
   logger: Logger;
   dataDir: string;
+  /** Absolute path to the server-level `.warren.yaml` this app reads (and the
+   *  config-editing API writes). Missing file → all-defaults at boot. */
+  configPath: string;
+  /** Re-read `configPath` from disk and apply it IN PLACE onto `config` (hot
+   *  reload). Applies on the next poll / next review; called by PUT /api/config. */
+  reloadConfig(): Promise<void>;
   /** Watched repos (server config + WARREN_REPOS), for introspection. */
   repos: RepoConfig[];
   /** Boot the trigger source; events flow into the job queue. Idempotent-ish. */
@@ -97,7 +103,11 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
   const dataDir = path.resolve(env.dataDir);
 
   // Server config (missing file → defaults); WARREN_LIVE overrides `live`.
-  const configPath = opts.configPath ?? path.join(process.cwd(), ".warren.yaml");
+  // Resolved to an absolute path so the config-editing API writes back to the
+  // exact same file the container reads, regardless of cwd.
+  const configPath = path.resolve(
+    opts.configPath ?? env.configPath ?? path.join(process.cwd(), ".warren.yaml"),
+  );
   const loaded = await loadWarrenConfig(configPath, env);
 
   // Merge WARREN_REPOS (csv owner/name) into the watched-repo list.
@@ -225,9 +235,24 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
     env,
     logger,
     dataDir,
-    repos: config.repos,
+    configPath,
+    // Live getter: reloadConfig() replaces config.repos, so a snapshot would go
+    // stale. Reads always reflect the current watched-repo list.
+    get repos(): RepoConfig[] {
+      return config.repos;
+    },
     configFor,
     clientFor,
+
+    async reloadConfig(): Promise<void> {
+      // Apply in place onto `config` so the trigger source + configFor + status
+      // route (all holding `config` by reference) observe the change live.
+      await reloadWarrenConfigInto(config, configPath, env, envRepos);
+      logger.info(
+        `config reloaded from ${path.basename(configPath)}: ` +
+          `watching ${config.repos.length} repo(s), minSeverity=${config.minSeverity}`,
+      );
+    },
 
     async start(): Promise<void> {
       if (started) return;

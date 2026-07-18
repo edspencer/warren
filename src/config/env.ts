@@ -19,6 +19,9 @@ export interface WarrenEnv {
   repos: string[];
   /** Base directory for JSON state + captured dry-run write payloads. */
   dataDir: string;
+  /** Optional explicit path to the server `.warren.yaml` (WARREN_CONFIG). When
+   *  unset the container falls back to `<cwd>/.warren.yaml`. */
+  configPath?: string;
   /** Dashboard/API authentication (installer-configured; mirrors Paddock). */
   auth: WarrenAuthConfig;
 }
@@ -70,6 +73,7 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): WarrenEnv {
     host: source.HOST || source.WARREN_HOST || "0.0.0.0",
     repos: csv(source.WARREN_REPOS),
     dataDir: source.WARREN_DATA_DIR || "./data",
+    configPath: source.WARREN_CONFIG || undefined,
     auth: {
       mode: authMode === "jwt" ? "jwt" : "none",
       jwtSecret: source.WARREN_JWT_SECRET || undefined,
@@ -93,6 +97,7 @@ export function redactedEnv(env: WarrenEnv): Record<string, unknown> {
     host: env.host,
     repos: env.repos,
     dataDir: env.dataDir,
+    configPath: env.configPath,
     authMode: env.auth.mode,
     hasJwtSecret: !!env.auth.jwtSecret,
     hasJwtIssuer: !!env.auth.jwtIssuer,

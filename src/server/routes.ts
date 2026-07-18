@@ -3,10 +3,16 @@
 // Minimal, LAN-only, no auth (v1). NEVER leaks tokens: /status reports only presence
 // booleans and non-secret config.
 
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+
 import type { FastifyInstance } from "fastify";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { ZodError } from "zod";
 
 import type { WarrenApp } from "../container.js";
-import { resolveRepoConfig } from "../config/load.js";
+import { parseWarrenConfig, resolveRepoConfig } from "../config/load.js";
+import { WarrenConfigRawZ } from "../config/schema.js";
 import type { HistoryRecord } from "../state/history.js";
 import type { Severity, WarrenConfig } from "../types.js";
 import {
@@ -17,6 +23,11 @@ import {
 } from "../types.js";
 
 const SEVERITIES: Severity[] = ["critical", "high", "medium", "low", "nit"];
+
+/** Is this a "file not found" (ENOENT) error? */
+function isNotFound(err: unknown): boolean {
+  return !!err && typeof err === "object" && (err as { code?: string }).code === "ENOENT";
+}
 
 function zeroSeverityCounts(): Record<Severity, number> {
   return { critical: 0, high: 0, medium: 0, low: 0, nit: 0 };
@@ -273,6 +284,111 @@ export function registerRoutes(server: FastifyInstance, app: WarrenApp): void {
       reviews,
       config: effectiveConfigView(effective),
     };
+  });
+
+  // ─────────────────────────── Config editing (#27) ───────────────────────────
+
+  // Read the current server config. Guarded like the rest of `/api/*` (open in
+  // `none` mode, bearer-required in `jwt` mode). The config is inherently
+  // SECRET-FREE — secrets live in the process env (GITHUB_TOKEN, ANTHROPIC_API_KEY,
+  // WARREN_JWT_SECRET), never in `.warren.yaml` (`trigger.secret_env` is only the
+  // NAME of an env var). Returns the parsed structured config (snake_case, defaults
+  // materialized — the shape the editor form round-trips) + the raw file text.
+  server.get("/api/config", async () => {
+    let text = "";
+    let exists = false;
+    try {
+      text = await readFile(app.configPath, "utf8");
+      exists = true;
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    let structured;
+    try {
+      structured = WarrenConfigRawZ.parse(parseYaml(text) ?? {});
+    } catch {
+      // The on-disk config is malformed/invalid (bad YAML, a schema-invalid value,
+      // or a torn/older file written outside the API). Fall back to a default
+      // structured config while STILL returning the raw text (below), so the editor
+      // loads and the operator can fix + re-save it — instead of 500ing the very
+      // page meant to repair it. (PUT validates before writing, so the API never
+      // creates such a file; external edits / partial writes can.)
+      structured = WarrenConfigRawZ.parse({});
+    }
+    return {
+      // snake_case config with every default applied (so newly-added schema knobs
+      // appear in the editor form automatically).
+      config: structured,
+      // The on-disk text if the file exists, else a serialized default so the raw
+      // editor is pre-populated with a valid starting point.
+      raw: exists ? text : stringifyYaml(structured),
+      exists,
+      // Basename only — don't leak the absolute server path.
+      path: path.basename(app.configPath),
+      authMode: app.env.auth.mode,
+      // Writes require jwt mode (see PUT below); the UI disables saving otherwise.
+      editable: app.env.auth.mode === "jwt",
+    };
+  });
+
+  // Write a new server config. HARD REQUIREMENT: `WARREN_AUTH_MODE=jwt` — in `jwt`
+  // mode the auth hook has already enforced a valid bearer token for this `/api/*`
+  // write (401 without); in `none` mode config writes are REFUSED (403) so an
+  // unauthenticated LAN deploy can't let anyone rewrite the review policy.
+  //
+  // Body: `{ yaml }` (raw text, written verbatim so comments/formatting survive) OR
+  // `{ config }` (structured snake_case, serialized to YAML). The submission is
+  // validated with the Zod schema BEFORE anything is written — invalid config →
+  // 400 with details, and the file on disk is left untouched. On success the file
+  // is written and hot-reloaded in place (applies on the next poll / next review).
+  server.put("/api/config", async (request, reply) => {
+    if (app.env.auth.mode !== "jwt") {
+      reply.code(403);
+      return {
+        error: "config editing is disabled unless WARREN_AUTH_MODE=jwt",
+        code: "auth_mode_required",
+      };
+    }
+
+    const body = (request.body ?? {}) as { yaml?: string; config?: unknown };
+    let textToWrite: string;
+    let toValidate: unknown;
+
+    if (typeof body.yaml === "string") {
+      textToWrite = body.yaml;
+      try {
+        toValidate = parseYaml(body.yaml) ?? {};
+      } catch (err) {
+        reply.code(400);
+        return {
+          error: "invalid YAML",
+          details: [{ path: "", message: (err as Error).message }],
+        };
+      }
+    } else if (body.config && typeof body.config === "object") {
+      toValidate = body.config;
+      textToWrite = stringifyYaml(body.config);
+    } else {
+      reply.code(400);
+      return { error: "body must be { yaml: string } or { config: object }" };
+    }
+
+    try {
+      parseWarrenConfig(toValidate); // Zod validate; throws ZodError on invalid.
+    } catch (err) {
+      if (err instanceof ZodError) {
+        reply.code(400);
+        return {
+          error: "config validation failed",
+          details: err.issues.map((i) => ({ path: i.path.join("."), message: i.message })),
+        };
+      }
+      throw err;
+    }
+
+    await writeFile(app.configPath, textToWrite, "utf8");
+    await app.reloadConfig();
+    return { ok: true, applied: true, path: path.basename(app.configPath) };
   });
 
   // Enqueue a manual review. Body is a full ReviewTarget, {target}, or {repo, prNumber}.
