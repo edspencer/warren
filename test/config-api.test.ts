@@ -64,6 +64,33 @@ describe("GET /api/config", () => {
     await server.close();
   });
 
+  it("does not 500 on a malformed/invalid on-disk config — returns raw text + default structured", async () => {
+    // Schema-invalid value that WarrenConfigRawZ.parse would throw on.
+    await writeFile(configPath, "min_severity: catastrophic\nprofile: chill\n", "utf8");
+    const { app } = makeFakeApp({ dataDir, configPath });
+    const server = createServer(app);
+    const res = await server.inject({ method: "GET", url: "/api/config" });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // Falls back to a valid default structured config so the editor can render.
+    expect(body.config.min_severity).toBe("low");
+    // Still surfaces the raw (broken) text so the operator can fix it in place.
+    expect(body.raw).toContain("catastrophic");
+    expect(body.exists).toBe(true);
+    await server.close();
+  });
+
+  it("does not 500 on malformed YAML on disk either", async () => {
+    await writeFile(configPath, "min_severity: [unclosed\n", "utf8");
+    const { app } = makeFakeApp({ dataDir, configPath });
+    const server = createServer(app);
+    const res = await server.inject({ method: "GET", url: "/api/config" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().config.min_severity).toBe("low");
+    expect(res.json().raw).toContain("unclosed");
+    await server.close();
+  });
+
   it("is editable=true in jwt mode (with a valid token)", async () => {
     const { app } = makeFakeApp({ dataDir, configPath, auth: { mode: "jwt", jwtSecret: SECRET } });
     const server = createServer(app);

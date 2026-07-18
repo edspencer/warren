@@ -303,8 +303,18 @@ export function registerRoutes(server: FastifyInstance, app: WarrenApp): void {
     } catch (err) {
       if (!isNotFound(err)) throw err;
     }
-    const parsed = parseYaml(text) ?? {};
-    const structured = WarrenConfigRawZ.parse(parsed);
+    let structured;
+    try {
+      structured = WarrenConfigRawZ.parse(parseYaml(text) ?? {});
+    } catch {
+      // The on-disk config is malformed/invalid (bad YAML, a schema-invalid value,
+      // or a torn/older file written outside the API). Fall back to a default
+      // structured config while STILL returning the raw text (below), so the editor
+      // loads and the operator can fix + re-save it — instead of 500ing the very
+      // page meant to repair it. (PUT validates before writing, so the API never
+      // creates such a file; external edits / partial writes can.)
+      structured = WarrenConfigRawZ.parse({});
+    }
     return {
       // snake_case config with every default applied (so newly-added schema knobs
       // appear in the editor form automatically).
