@@ -31,6 +31,7 @@ import { runAgentTurn } from "../herd/run.js";
 import { reviewerAgentConfig, triageAgentConfig, verifyAgentConfig } from "../herd/reviewer.js";
 import { fingerprint, encodeFindingMarker, decodeFindingMarker } from "./fingerprint.js";
 import { effectiveMinSeverity, gateFindings, meetsSeverity } from "./gate.js";
+import { budgetSkipReason, effortSettings, isReleaseDiff } from "./policy.js";
 import { buildBatchVerifyPrompt, buildReviewPrompt, buildReviewSystemAppend, buildTriagePrompt, toPromptContext } from "./prompts.js";
 import { createReviewTargetProvider, type MaterializedTarget, type ReviewTargetProvider } from "./target.js";
 
@@ -88,7 +89,11 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
   const target = event.target;
   const cfg = deps.config(target);
   const key = targetKey(target);
-  const verifyEnabled = deps.verify ?? true;
+  // Effort knob (#26): drives whether triage/verify run + the reviewer turn budget.
+  // Explicit deps.triage/deps.verify (tests, CLI) still override the effort default.
+  const effort = effortSettings(cfg.review.effort);
+  const verifyEnabled = deps.verify ?? effort.verify;
+  const triageEnabled = deps.triage ?? effort.triage;
   const st = await deps.state.getPrState(key);
 
   // 1. Paused/ignored guard (explicit commands override).
@@ -113,13 +118,40 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
       return noopResult(target, cfg, start, mt.headSha);
     }
 
+    // Post-materialize skips (#26). Applied to AUTO reviews only — an explicit
+    // @warren command is a human override and always runs. Both advance
+    // lastReviewedSha so a skipped head is not re-attempted every poll.
+    if (event.reason !== "command") {
+      const paths = mt.files.map((f) => f.path);
+      if (cfg.autoReview.skipReleasePrs && isReleaseDiff(paths)) {
+        deps.logger.info(`pipeline: ${key} is a release-only diff; skipping (skip_release_prs).`);
+        await deps.state.setPrState(key, (s) => ({
+          ...s,
+          lastReviewedSha: mt.headSha || s.lastReviewedSha,
+        }));
+        return noopResult(target, cfg, start, mt.headSha);
+      }
+      const overBudget = budgetSkipReason(
+        { fileCount: mt.files.length, diffChars: mt.diff.length },
+        cfg.review,
+      );
+      if (overBudget) {
+        deps.logger.warn(`pipeline: ${key} skipped — ${overBudget}.`);
+        await deps.state.setPrState(key, (s) => ({
+          ...s,
+          lastReviewedSha: mt.headSha || s.lastReviewedSha,
+        }));
+        return noopResult(target, cfg, start, mt.headSha);
+      }
+    }
+
     const ctx = toPromptContext(mt, cfg);
     const slug = agentSlug(target);
     const client = deps.clientFor?.(target) ?? null;
 
-    // 3. Triage pass — HOOK. Skipped in M1 unless explicitly enabled (token-thrifty).
+    // 3. Triage pass — HOOK. Runs when review.effort=high (or deps.triage override).
     let walkthroughSkeleton = "";
-    if (deps.triage) {
+    if (triageEnabled) {
       const triageName = `triage-${slug}`;
       await deps.fleet.addReviewAgent(
         triageAgentConfig({ name: triageName, workingDir: mt.checkoutDir, model: cfg.models.triage }),
@@ -136,7 +168,12 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
     // 4. Review pass (agentic; findings come back via the github_pr MCP collector).
     const reviewerName = `reviewer-${slug}`;
     await deps.fleet.addReviewAgent(
-      reviewerAgentConfig({ name: reviewerName, workingDir: mt.checkoutDir, model: cfg.models.review }),
+      reviewerAgentConfig({
+        name: reviewerName,
+        workingDir: mt.checkoutDir,
+        model: cfg.models.review,
+        maxTurns: effort.reviewerMaxTurns,
+      }),
     );
     const reviewMcp = createGithubPrMcp({
       client,
