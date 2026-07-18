@@ -100,6 +100,13 @@ const WarrenConfigRawZ = z.object({
       // Soft budget ceilings; 0 = no cap. A PR over the cap is skipped, not reviewed.
       max_files: z.number().int().nonnegative().default(0),
       max_tokens: z.number().int().nonnegative().default(0),
+      // SECURITY knob: how much host access the review agent gets on the UNTRUSTED
+      // checkout. `static` (default) = NO Bash — Read/Grep/Glob/Task only, so PR code
+      // is inspected, never executed. `full` = Bash allowed (arbitrary exec — only for
+      // repos you fully trust). `trusted` = `full` for authors on the `auto_review.authors`
+      // allowlist, `static` for everyone else. Until a sandbox lands (see SECURITY.md),
+      // prefer `static`/`trusted`. Per-repo overridable.
+      execution: z.enum(["static", "full", "trusted"]).default("static"),
     })
     .default({}),
   path_filters: z
@@ -127,6 +134,20 @@ const WarrenConfigRawZ = z.object({
     .default({}),
   // Auto-resolve a fixed finding's review thread on re-review. Default true.
   resolve_on_fix: z.boolean().default(true),
+  // Sandbox posture for the review agent (SECURITY.md). `docker` mode + egress
+  // allowlist + resource limits are DESIGN-ONLY today (schema wired, runtime not) —
+  // this box has no docker CLI to exercise them. `none` (default) is implemented.
+  sandbox: z
+    .object({
+      mode: z.enum(["none", "docker"]).default("none"),
+      // GitHub + Anthropic only — everything else is exfiltration surface.
+      egress_allowlist: z
+        .array(z.string())
+        .default(["api.github.com", "github.com", "codeload.github.com", "api.anthropic.com"]),
+      memory_mb: z.number().int().nonnegative().default(0),
+      cpus: z.number().nonnegative().default(0),
+    })
+    .default({}),
   live: z.boolean().default(false), // env WARREN_LIVE overrides in load.ts
   concurrency: z.number().int().positive().default(3),
   repos: z.array(RepoConfigZ).default([]),
@@ -209,6 +230,7 @@ export function toWarrenConfig(raw: WarrenConfigRaw): WarrenConfig {
       effort: raw.review.effort,
       maxFiles: raw.review.max_files,
       maxTokens: raw.review.max_tokens,
+      execution: raw.review.execution,
     },
     pathFilters: raw.path_filters,
     pathInstructions: raw.path_instructions.map((p) => ({
@@ -226,6 +248,12 @@ export function toWarrenConfig(raw: WarrenConfigRaw): WarrenConfig {
       verify: raw.models.verify,
     },
     resolveOnFix: raw.resolve_on_fix,
+    sandbox: {
+      mode: raw.sandbox.mode,
+      egressAllowlist: raw.sandbox.egress_allowlist,
+      memoryMb: raw.sandbox.memory_mb,
+      cpus: raw.sandbox.cpus,
+    },
     live: raw.live,
     concurrency: raw.concurrency,
     repos: raw.repos.map(mapRepo),

@@ -22,6 +22,7 @@ import {
   type TriggerResult,
 } from "@herdctl/core";
 import type { ReviewerAgentConfig } from "./reviewer.js";
+import { REVIEWER_DENIED_TOOLS, STATIC_REVIEWER_TOOLS } from "./reviewer.js";
 
 /** Fleet-level defaults written into the generated herdctl.yaml `defaults` block.
  *  Every field is optional; sensible Warren defaults fill the gaps. These deep-merge
@@ -92,26 +93,11 @@ function buildZeroAgentConfig(defaults?: FleetDefaults): Record<string, unknown>
       model: defaults?.model ?? "claude-opus-4-8",
       max_turns: defaults?.maxTurns ?? 200,
       permission_mode: defaults?.permissionMode ?? "acceptEdits",
-      allowed_tools: defaults?.allowedTools ?? [
-        "Read",
-        "Grep",
-        "Glob",
-        "Bash",
-        "Task",
-        "TodoWrite",
-        "ToolSearch",
-        "mcp__github_pr__*",
-      ],
-      denied_tools: defaults?.deniedTools ?? [
-        "Bash(sudo *)",
-        "Bash(rm -rf /)",
-        "Bash(rm -rf /*)",
-        "Bash(chmod 777 *)",
-        "Bash(git push *)",
-        "Bash(gh *)",
-        "Write",
-        "Edit",
-      ],
+      // SECURITY: default to the STATIC (no-Bash) tool set. Each review agent sets its
+      // own allowed_tools explicitly (which wins), so this default only governs any agent
+      // that doesn't — and it should fail safe, not hand out Bash on untrusted code.
+      allowed_tools: defaults?.allowedTools ?? STATIC_REVIEWER_TOOLS,
+      denied_tools: defaults?.deniedTools ?? REVIEWER_DENIED_TOOLS,
     },
   };
 }

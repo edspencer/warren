@@ -155,6 +155,35 @@ export interface WarrenCommand {
 // config/schema.ts builds the Zod schema whose transform PRODUCES these shapes,
 // and re-exports these type names for the config seam.
 
+/**
+ * How much host access the review agent gets on the UNTRUSTED checkout.
+ *   • `static`  — Read/Grep/Glob/Task only; NO Bash (PR code is inspected, never run).
+ *   • `full`    — Bash allowed (arbitrary exec on the checkout); fully-trusted repos only.
+ *   • `trusted` — resolves to `full` for allowlisted authors, else `static`.
+ * The RESOLVED per-review mode is only ever `static` | `full` (see resolveExecution).
+ */
+export type ExecutionMode = "static" | "full" | "trusted";
+
+/** The resolved, per-review execution mode (never `trusted` — that's resolved away). */
+export type ResolvedExecutionMode = "static" | "full";
+
+/**
+ * Sandbox posture for the review agent (SECURITY.md). `docker` is DESIGN-ONLY today —
+ * the schema + knobs exist so a deploy can express intent, but the container runtime
+ * is not yet wired (this box has no docker CLI to exercise it). `none` (default) runs
+ * the agent in-process on the host, boxed by the `execution` tool policy above.
+ */
+export interface SandboxConfig {
+  /** `none` (default, implemented) | `docker` (design-only; see SECURITY.md). */
+  mode: "none" | "docker";
+  /** Network-egress allowlist (host globs). DESIGN-ONLY — enforced by the container
+   *  runtime once `mode: docker` lands. Defaults cover GitHub + Anthropic APIs. */
+  egressAllowlist: string[];
+  /** Container resource limits (DESIGN-ONLY). */
+  memoryMb: number; // 0 = runtime default
+  cpus: number; // 0 = runtime default
+}
+
 export interface WarrenConfig {
   profile: "chill" | "assertive";
   minSeverity: Severity; // findings below this are dropped
@@ -203,6 +232,12 @@ export interface WarrenConfig {
     // rather than reviewed, so a giant/generated diff can't blow the token budget.
     maxFiles: number;
     maxTokens: number; // estimated from diff size (~chars/4)
+    // SECURITY: how much host access the review agent gets on the UNTRUSTED checkout.
+    //   • static  (default) — NO Bash; Read/Grep/Glob/Task only. PR code is never executed.
+    //   • full              — Bash allowed (arbitrary exec). Only for fully-trusted repos.
+    //   • trusted           — full for authors on `autoReview.authors`, else static.
+    // See review/policy.ts (resolveExecution) + SECURITY.md.
+    execution: ExecutionMode;
   };
   pathFilters: string[]; // gitignore-style; "!" prefix = exclude
   pathInstructions: Array<{ path: string; instructions: string }>;
@@ -212,6 +247,9 @@ export interface WarrenConfig {
   // On re-review, auto-resolve the GitHub review thread of a previously-posted
   // finding the author has since fixed (no longer detected). Default true.
   resolveOnFix: boolean;
+  // Sandbox posture (SECURITY.md). `docker` is design-only today; `none` (default)
+  // runs the agent in-process, boxed by the per-review `review.execution` tool policy.
+  sandbox: SandboxConfig;
   live: boolean; // resolved: WARREN_LIVE OR config; false = dry-run
   repos: RepoConfig[]; // watched repos (server-level config)
   concurrency: number; // max parallel reviews (JobQueue)

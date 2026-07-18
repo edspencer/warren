@@ -25,6 +25,7 @@ import { runAgentTurn } from "./run.js";
 import { askAgentConfig } from "./reviewer.js";
 import type { ReviewTargetProvider } from "../review/target.js";
 import { buildAskPrompt, buildAskSystemAppend, toPromptContext } from "../review/prompts.js";
+import { resolveExecution } from "../review/policy.js";
 
 export interface AskHandlerDeps {
   fleet: FleetWrapper;
@@ -92,8 +93,15 @@ export async function handleAsk(deps: AskHandlerDeps, req: AskRequest): Promise<
   try {
     const slug = sanitize(key).slice(0, 48).toLowerCase() || "target";
     const agentName = `ask-${slug}`;
+    // SECURITY: same untrusted-checkout execution gate as the review pass.
+    const execution = resolveExecution(cfg, mt.context.author);
     await deps.fleet.addReviewAgent(
-      askAgentConfig({ name: agentName, workingDir: mt.checkoutDir, model: cfg.models.review }),
+      askAgentConfig({
+        name: agentName,
+        workingDir: mt.checkoutDir,
+        model: cfg.models.review,
+        execution,
+      }),
     );
 
     const prompt = buildAskPrompt(question, {

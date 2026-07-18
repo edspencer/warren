@@ -31,7 +31,7 @@ import { runAgentTurn } from "../herd/run.js";
 import { reviewerAgentConfig, triageAgentConfig, verifyAgentConfig } from "../herd/reviewer.js";
 import { fingerprint, encodeFindingMarker, decodeFindingMarker } from "./fingerprint.js";
 import { effectiveMinSeverity, gateFindings, meetsSeverity } from "./gate.js";
-import { budgetSkipReason, effortSettings, isReleaseDiff } from "./policy.js";
+import { budgetSkipReason, effortSettings, isReleaseDiff, resolveExecution } from "./policy.js";
 import { buildBatchVerifyPrompt, buildReviewPrompt, buildReviewSystemAppend, buildTriagePrompt, toPromptContext } from "./prompts.js";
 import { createReviewTargetProvider, type MaterializedTarget, type ReviewTargetProvider } from "./target.js";
 
@@ -149,6 +149,15 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
     const slug = agentSlug(target);
     const client = deps.clientFor?.(target) ?? null;
 
+    // SECURITY: resolve how much host access the agent gets on this UNTRUSTED checkout.
+    // `static` (default) removes Bash entirely; `full`/`trusted` (per-author) allow it.
+    const execution = resolveExecution(cfg, mt.context.author);
+    if (execution === "full") {
+      deps.logger.info(`pipeline: ${key} running review in FULL (Bash-enabled) execution mode.`);
+    } else {
+      deps.logger.debug(`pipeline: ${key} running review in STATIC (no-Bash) execution mode.`);
+    }
+
     // 3. Triage pass — HOOK. Runs when review.effort=high (or deps.triage override).
     let walkthroughSkeleton = "";
     if (triageEnabled) {
@@ -173,6 +182,7 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
         workingDir: mt.checkoutDir,
         model: cfg.models.review,
         maxTurns: effort.reviewerMaxTurns,
+        execution,
       }),
     );
     const reviewMcp = createGithubPrMcp({
@@ -208,7 +218,7 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
     const toVerify = rawFindings.filter((f) => meetsSeverity(f.severity, minSev));
     let survivors: Map<string, { keep: boolean; confidence: number }> | null = null;
     if (verifyEnabled && toVerify.length > 0) {
-      survivors = await runVerifyPass(deps, mt, cfg, slug, toVerify);
+      survivors = await runVerifyPass(deps, mt, cfg, slug, toVerify, execution);
     }
 
     const candidates: Finding[] = rawFindings.map((rf) =>
@@ -336,10 +346,16 @@ async function runVerifyPass(
   cfg: WarrenConfig,
   slug: string,
   findings: RawFinding[],
+  execution: "static" | "full",
 ): Promise<Map<string, { keep: boolean; confidence: number }>> {
   const verifyName = `verify-${slug}`;
   await deps.fleet.addReviewAgent(
-    verifyAgentConfig({ name: verifyName, workingDir: mt.checkoutDir, model: cfg.models.verify }),
+    verifyAgentConfig({
+      name: verifyName,
+      workingDir: mt.checkoutDir,
+      model: cfg.models.verify,
+      execution,
+    }),
   );
   const ctx = toPromptContext(mt, cfg);
   const { text } = await runAgentTurn({

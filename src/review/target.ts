@@ -80,8 +80,12 @@ export interface ReviewTargetProviderDeps {
   logger?: Logger;
   /** Resolve the GitHubClient for a github-pr target (null/absent for local-git). */
   clientFor?: (t: ReviewTarget) => GitHubClient | null;
-  /** GitHub token used ONLY to build the clone remote URL. NEVER logged. */
+  /** GitHub token, supplied to git via a command-scoped credential helper (never
+   *  embedded in the remote URL, argv, or the checkout's `.git/config`). NEVER logged. */
   githubToken?: string;
+  /** Test seam: override the clone remote URL (e.g. a local bare repo). Must be
+   *  credential-free — the token flows through the credential helper, not the URL. */
+  remoteUrlFor?: (t: import("../types.js").GithubPrTarget) => string;
   /** Per-target path filters (gitignore-style, `!` = exclude). Overrides `pathFilters`. */
   pathFiltersFor?: (t: ReviewTarget) => string[];
   /** Fallback path filters when `pathFiltersFor` is absent. */
@@ -114,26 +118,55 @@ export function createReviewTargetProvider(
 // ─────────────────────────── Shared helpers ───────────────────────────
 
 /**
- * Run `git` with argv (no shell), returning stdout. `token`, when given, is scrubbed
- * from any error text so a credential-bearing remote URL never leaks into logs/throws.
+ * Env var the credential helper (below) reads the token from. The token is passed
+ * ONLY through the process environment of the `git` child — never in argv (which is
+ * world-readable via `ps`) and never persisted into a checkout's `.git/config`.
+ */
+export const GIT_TOKEN_ENV = "WARREN_GIT_TOKEN";
+
+/**
+ * A git credential.helper that answers `get` with a static `x-access-token` username
+ * and the token from `$WARREN_GIT_TOKEN`. The `!` prefix runs it as a shell snippet.
+ * Because it's supplied per-invocation via `-c` (command-scoped config), it is NEVER
+ * written to the repo's `.git/config`, so no token-bearing string survives the fetch.
+ */
+const GIT_CREDENTIAL_HELPER =
+  `!f() { test "$1" = get && ` +
+  `printf 'username=x-access-token\\npassword=%s\\n' "$${GIT_TOKEN_ENV}"; }; f`;
+
+/**
+ * Run `git` with argv (no shell), returning stdout.
+ *
+ * When `token` is given it is injected via a command-scoped credential helper that
+ * reads the secret from the child's environment (`GIT_TOKEN_ENV`) — the token is
+ * therefore NEVER embedded in the remote URL, in argv, or in the checkout's
+ * `.git/config`. `token` is also scrubbed from any error text as belt-and-suspenders.
  */
 export function runGit(
   args: string[],
   opts: { cwd?: string; token?: string } = {},
 ): Promise<string> {
+  const token = opts.token && opts.token.length > 0 ? opts.token : "";
+  // `-c credential.helper=` first resets any inherited/system helper, then ours is
+  // appended. Both are command-scoped (`-c`), so nothing lands in `.git/config`.
+  const credArgs = token
+    ? ["-c", "credential.helper=", "-c", `credential.helper=${GIT_CREDENTIAL_HELPER}`]
+    : [];
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "",
+  };
+  if (token) env[GIT_TOKEN_ENV] = token;
+  const fullArgs = [...credArgs, ...args];
   return new Promise((resolve, reject) => {
     execFile(
       "git",
-      args,
-      {
-        cwd: opts.cwd,
-        maxBuffer: 128 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "" },
-      },
+      fullArgs,
+      { cwd: opts.cwd, maxBuffer: 128 * 1024 * 1024, env },
       (err, stdout, stderr) => {
         if (err) {
-          const scrub = (s: string) =>
-            opts.token && opts.token.length > 0 ? s.split(opts.token).join("***") : s;
+          const scrub = (s: string) => (token ? s.split(token).join("***") : s);
           reject(
             new Error(
               `git ${scrub(args.join(" "))} failed: ${scrub(String(stderr || err.message))}`,

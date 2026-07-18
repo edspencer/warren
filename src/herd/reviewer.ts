@@ -31,19 +31,47 @@ export const CHEAP_MODEL = "claude-haiku-4-5-20251001";
 export const GITHUB_PR_MCP = "mcp__github_pr__*";
 
 /**
- * Guardrails applied to every pass. The reviewer never writes to the repo and
- * never has a credentialed egress path (its ONLY write channel is the injected
- * github_pr MCP server, whose handlers run in Warren's process).
+ * Guardrails applied to every pass. The reviewer never writes to the repo and never
+ * has a credentialed egress path (its ONLY write channel is the injected github_pr MCP
+ * server, whose handlers run in Warren's process).
+ *
+ * SECURITY NOTE: a Bash denylist is DEFENSE-IN-DEPTH, not a boundary — it is trivially
+ * bypassed (`curl x | sh`, `bash -c '…'`, `env`, a Python one-liner, …). The real control
+ * against untrusted PR code is `review.execution: static`, which removes `Bash` from
+ * `allowed_tools` entirely (see reviewerAgentConfig + resolveExecution). This list stays
+ * for the `full` path and to blunt the most obvious footguns; it is NOT relied upon.
  */
 export const REVIEWER_DENIED_TOOLS = [
+  // Privilege / destruction / persistence.
   "Bash(sudo *)",
   "Bash(rm -rf /)",
   "Bash(rm -rf /*)",
-  "Bash(chmod 777 *)",
+  "Bash(chmod *)",
+  "Bash(chown *)",
+  // Write/push/credential paths.
   "Bash(git push *)",
+  "Bash(git config *)",
   "Bash(gh *)",
+  // Obvious remote-exec / exfil launchers (best-effort; not a boundary).
+  "Bash(curl *)",
+  "Bash(wget *)",
+  "Bash(nc *)",
+  "Bash(ncat *)",
+  "Bash(ssh *)",
+  "Bash(scp *)",
   "Write",
   "Edit",
+];
+
+/** Reviewer tools MINUS Bash — the `static` (untrusted-safe) tool set. */
+export const STATIC_REVIEWER_TOOLS = [
+  "Read",
+  "Grep",
+  "Glob",
+  "Task",
+  "TodoWrite",
+  "ToolSearch",
+  GITHUB_PR_MCP,
 ];
 
 /** An agent-config object literal, as consumed by `FleetManager.addAgent`. */
@@ -61,6 +89,23 @@ export interface AgentConfigParams {
   maxTurns?: number;
   /** Optional per-repo parallelism; defaults to 4 so concurrent PRs don't throw. */
   maxConcurrent?: number;
+  /**
+   * SECURITY: resolved execution mode for the UNTRUSTED checkout.
+   *   • "static" (default) — NO Bash; the agent can Read/Grep/Glob/Task only.
+   *   • "full"             — Bash allowed (arbitrary exec). Trusted repos/authors only.
+   * Passes that run on the checkout (reviewer/verify/ask) honor this; see resolveExecution.
+   */
+  execution?: "static" | "full";
+}
+
+/** Prepend Bash to a static tool set when execution === "full". Keeps the github_pr
+ *  MCP allowlist entry last (matching the original ordering). */
+function withExecutionTools(staticTools: string[], execution: "static" | "full"): string[] {
+  if (execution !== "full") return [...staticTools];
+  // Insert Bash before the trailing MCP wildcard to preserve the prior tool ordering.
+  const mcpIdx = staticTools.indexOf(GITHUB_PR_MCP);
+  if (mcpIdx < 0) return [...staticTools, "Bash"];
+  return [...staticTools.slice(0, mcpIdx), "Bash", ...staticTools.slice(mcpIdx)];
 }
 
 /**
@@ -71,7 +116,14 @@ export interface AgentConfigParams {
  * TriggerOptions.systemPromptAppend at trigger time.
  */
 export function reviewerAgentConfig(params: AgentConfigParams): ReviewerAgentConfig {
-  const { name, workingDir, model = REVIEW_MODEL, maxTurns = 30, maxConcurrent = 4 } = params;
+  const {
+    name,
+    workingDir,
+    model = REVIEW_MODEL,
+    maxTurns = 30,
+    maxConcurrent = 4,
+    execution = "static",
+  } = params;
   return {
     name,
     description: `Warren agentic PR reviewer (${name}).`,
@@ -81,16 +133,8 @@ export function reviewerAgentConfig(params: AgentConfigParams): ReviewerAgentCon
     permission_mode: "acceptEdits",
     max_turns: maxTurns,
     instances: { max_concurrent: maxConcurrent },
-    allowed_tools: [
-      "Read",
-      "Grep",
-      "Glob",
-      "Bash",
-      "Task",
-      "TodoWrite",
-      "ToolSearch",
-      GITHUB_PR_MCP,
-    ],
+    // `static` (default) drops Bash so untrusted PR code is inspected, never executed.
+    allowed_tools: withExecutionTools(STATIC_REVIEWER_TOOLS, execution),
     denied_tools: REVIEWER_DENIED_TOOLS,
     default_prompt: "Review the current diff.",
   };
@@ -126,7 +170,16 @@ export function triageAgentConfig(params: AgentConfigParams): ReviewerAgentConfi
  * agent never touches a credential). Read-only evidence tools mirror the reviewer.
  */
 export function askAgentConfig(params: AgentConfigParams): ReviewerAgentConfig {
-  const { name, workingDir, model = REVIEW_MODEL, maxTurns = 20, maxConcurrent = 4 } = params;
+  const {
+    name,
+    workingDir,
+    model = REVIEW_MODEL,
+    maxTurns = 20,
+    maxConcurrent = 4,
+    execution = "static",
+  } = params;
+  // No github_pr MCP and no write tools: the ask agent only produces a text answer.
+  const staticTools = ["Read", "Grep", "Glob", "Task", "TodoWrite", "ToolSearch"];
   return {
     name,
     description: `Warren conversational answerer (${name}).`,
@@ -136,8 +189,7 @@ export function askAgentConfig(params: AgentConfigParams): ReviewerAgentConfig {
     permission_mode: "acceptEdits",
     max_turns: maxTurns,
     instances: { max_concurrent: maxConcurrent },
-    // No github_pr MCP and no write tools: the ask agent only produces a text answer.
-    allowed_tools: ["Read", "Grep", "Glob", "Bash", "Task", "TodoWrite", "ToolSearch"],
+    allowed_tools: withExecutionTools(staticTools, execution),
     denied_tools: REVIEWER_DENIED_TOOLS,
     default_prompt: "Answer the question about this PR.",
   };
@@ -149,7 +201,15 @@ export function askAgentConfig(params: AgentConfigParams): ReviewerAgentConfig {
  * checks (lint/tests) — then reports a keep/drop verdict.
  */
 export function verifyAgentConfig(params: AgentConfigParams): ReviewerAgentConfig {
-  const { name, workingDir, model = CHEAP_MODEL, maxTurns = 15, maxConcurrent = 4 } = params;
+  const {
+    name,
+    workingDir,
+    model = CHEAP_MODEL,
+    maxTurns = 15,
+    maxConcurrent = 4,
+    execution = "static",
+  } = params;
+  const staticTools = ["Read", "Grep", "Glob", "ToolSearch", GITHUB_PR_MCP];
   return {
     name,
     description: `Warren verify pass (${name}).`,
@@ -159,7 +219,7 @@ export function verifyAgentConfig(params: AgentConfigParams): ReviewerAgentConfi
     permission_mode: "acceptEdits",
     max_turns: maxTurns,
     instances: { max_concurrent: maxConcurrent },
-    allowed_tools: ["Read", "Grep", "Glob", "Bash", "ToolSearch", GITHUB_PR_MCP],
+    allowed_tools: withExecutionTools(staticTools, execution),
     denied_tools: REVIEWER_DENIED_TOOLS,
     default_prompt: "Verify the proposed findings.",
   };

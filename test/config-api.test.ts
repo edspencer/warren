@@ -43,8 +43,12 @@ describe("GET /api/config", () => {
     expect(body.exists).toBe(false);
     // raw is a serialized default when the file is absent (valid starting point).
     expect(body.raw).toContain("min_severity");
-    // Never leaks a token or the absolute server path.
-    expect(JSON.stringify(body)).not.toContain("token");
+    // Never leaks a secret token VALUE or the absolute server path. (Match token
+    // VALUES/credential markers — not the substring "token", which legitimately
+    // appears in config KEYS like `review.max_tokens`.)
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("x-access-token");
+    expect(serialized).not.toMatch(/gh[pousr]_[A-Za-z0-9]/); // ghp_/gho_/ghu_/ghs_/ghr_
     expect(body.path).toBe(".warren.yaml");
     expect(body.authMode).toBe("none");
     expect(body.editable).toBe(false);

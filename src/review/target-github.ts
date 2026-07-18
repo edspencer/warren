@@ -3,8 +3,13 @@
 // Builds diff + changed files from the GitHubClient (full `getDiff`/`listFiles`, or an
 // incremental `compare(sinceSha, headSha)` when `!full && sinceSha`), shallow-clones the
 // repo at head SHA into `${dataDir}/checkouts/<key>` (reused + refetched across runs), and
-// exposes `readFile`/`dispose`. All git runs go through the shared `runGit` helper, which
-// SCRUBS the token from any error text — the credential-bearing remote URL never leaks.
+// exposes `readFile`/`dispose`. All git runs go through the shared `runGit` helper.
+//
+// SECURITY: the checkout is UNTRUSTED PR code the review agent can Read/Grep (and, in
+// `full` execution mode, Bash). The GitHub token is therefore NEVER embedded in the
+// remote URL — `runGit` supplies it via a command-scoped credential helper reading the
+// child's env, so no token-bearing string is written to the checkout's `.git/config`
+// (a `cat .git/config` by the agent or a repo script yields nothing). See prepareCheckout.
 
 import { existsSync } from "node:fs";
 import { mkdir, readFile as fsReadFile, rm } from "node:fs/promises";
@@ -91,25 +96,59 @@ export class GithubPrTargetProvider implements ReviewTargetProvider {
 
   /**
    * Shallow clone (or reuse + refetch) the repo at head SHA into
-   * `${dataDir}/checkouts/<sanitized-key>`. The token is embedded only in the remote
-   * URL and never logged (runGit scrubs it from errors).
+   * `${dataDir}/checkouts/<sanitized-key>`. Delegates to the standalone
+   * `prepareCheckout` helper so it can be unit-tested against a local remote.
    */
   private async prepareCheckout(t: GithubPrTarget): Promise<string> {
     const dir = join(this.deps.dataDir, "checkouts", sanitizeKey(targetKey(t)));
-    const token = this.deps.githubToken ?? "";
-    const cred = token ? `x-access-token:${token}@` : "";
-    const remote = `https://${cred}github.com/${t.repo.owner}/${t.repo.name}.git`;
-
-    await mkdir(dir, { recursive: true });
-    if (existsSync(join(dir, ".git"))) {
-      // Reuse: refresh the remote URL (token may have rotated) then refetch head.
-      await runGit(["remote", "set-url", "origin", remote], { cwd: dir, token });
-    } else {
-      await runGit(["init", "--quiet"], { cwd: dir, token });
-      await runGit(["remote", "add", "origin", remote], { cwd: dir, token });
-    }
-    await runGit(["fetch", "--depth", "1", "--quiet", "origin", t.headSha], { cwd: dir, token });
-    await runGit(["checkout", "--quiet", "--force", t.headSha], { cwd: dir, token });
-    return dir;
+    const remoteUrl =
+      this.deps.remoteUrlFor?.(t) ?? defaultGithubRemote(t.repo.owner, t.repo.name);
+    return prepareCheckout({
+      dir,
+      remoteUrl,
+      headSha: t.headSha,
+      token: this.deps.githubToken ?? "",
+    });
   }
+}
+
+/** Build the credential-FREE github remote URL. The token is supplied at fetch time by
+ *  `runGit`'s credential helper, NOT embedded here — so it never persists in `.git/config`. */
+export function defaultGithubRemote(owner: string, name: string): string {
+  return `https://github.com/${owner}/${name}.git`;
+}
+
+export interface PrepareCheckoutOpts {
+  /** Absolute checkout dir (created if absent). */
+  dir: string;
+  /** Credential-FREE remote URL. Never embed a token here. */
+  remoteUrl: string;
+  /** Commit to fetch + check out. */
+  headSha: string;
+  /** GitHub token, passed to `runGit` (credential-helper env) — never written to disk. */
+  token?: string;
+}
+
+/**
+ * Shallow clone (or reuse + refetch) a repo at `headSha` into `dir`, authenticating via
+ * `runGit`'s command-scoped credential helper. Guarantees no token-bearing string is
+ * written to `dir/.git/config`: the remote URL is credential-free, and on REUSE we
+ * `remote set-url` back to the credential-free URL — which also SCRUBS any token a prior
+ * (pre-hardening) run may have persisted. Returns the checkout dir.
+ */
+export async function prepareCheckout(opts: PrepareCheckoutOpts): Promise<string> {
+  const { dir, remoteUrl, headSha } = opts;
+  const token = opts.token ?? "";
+  await mkdir(dir, { recursive: true });
+  if (existsSync(join(dir, ".git"))) {
+    // Reuse: reset the remote URL to the credential-free URL (also scrubs any legacy
+    // token a pre-hardening checkout embedded), then refetch head.
+    await runGit(["remote", "set-url", "origin", remoteUrl], { cwd: dir });
+  } else {
+    await runGit(["init", "--quiet"], { cwd: dir });
+    await runGit(["remote", "add", "origin", remoteUrl], { cwd: dir });
+  }
+  await runGit(["fetch", "--depth", "1", "--quiet", "origin", headSha], { cwd: dir, token });
+  await runGit(["checkout", "--quiet", "--force", headSha], { cwd: dir });
+  return dir;
 }

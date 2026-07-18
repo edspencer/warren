@@ -75,6 +75,16 @@ review:
   # is estimated from the diff size (~4 chars/token).
   max_files: 0
   max_tokens: 0
+  # SECURITY: how much host access the review agent gets on the UNTRUSTED checkout.
+  #   static  (default) — NO Bash. Read/Grep/Glob/Task only; PR code is inspected,
+  #                       never executed. The safe posture for untrusted PRs.
+  #   full              — Bash allowed (arbitrary exec on the checkout). Only for
+  #                       repos you FULLY trust. A Bash denylist is defense-in-depth,
+  #                       NOT a boundary (curl|sh bypasses it) — see SECURITY.md.
+  #   trusted           — full for PR authors on `auto_review.authors`, static for
+  #                       everyone else (empty allowlist ⇒ trust no one). Good for a
+  #                       repo that takes outside contributions.
+  execution: static
 
 # Glob filters applied to changed files. `!` negates (exclude). Defaults exclude
 # build output, lockfiles, and vendored deps.
@@ -104,6 +114,23 @@ models:
 
 # On re-review, auto-resolve the GitHub thread of a finding the author has fixed.
 resolve_on_fix: true
+
+# Sandbox posture for the review agent. DESIGN-ONLY today (see SECURITY.md): the
+# schema is wired so a deploy can express intent, but the container runtime is NOT
+# yet enforced. `none` (default) runs the agent in-process, boxed by `review.execution`
+# above. `docker` (roadmap) will run each turn in an ephemeral non-root, read-only-rootfs
+# container with resource limits and a locked-down egress allowlist.
+sandbox:
+  mode: none               # none (default, implemented) | docker (design-only)
+  # Network-egress allowlist — GitHub + Anthropic only; everything else is
+  # exfiltration surface. Enforced once `mode: docker` lands.
+  egress_allowlist:
+    - api.github.com
+    - github.com
+    - codeload.github.com
+    - api.anthropic.com
+  memory_mb: 0             # container memory cap (0 = runtime default)
+  cpus: 0                  # container CPU cap (0 = runtime default)
 
 # Post for real. Default false (dry-run: reads GitHub, captures would-be writes to
 # disk, never posts). The WARREN_LIVE env var overrides this when set.
