@@ -105,7 +105,9 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
   // Server config (missing file → defaults); WARREN_LIVE overrides `live`.
   // Resolved to an absolute path so the config-editing API writes back to the
   // exact same file the container reads, regardless of cwd.
-  const configPath = path.resolve(opts.configPath ?? path.join(process.cwd(), ".warren.yaml"));
+  const configPath = path.resolve(
+    opts.configPath ?? env.configPath ?? path.join(process.cwd(), ".warren.yaml"),
+  );
   const loaded = await loadWarrenConfig(configPath, env);
 
   // Merge WARREN_REPOS (csv owner/name) into the watched-repo list.
