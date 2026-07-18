@@ -55,6 +55,27 @@ export function applyEnvOverrides(config: WarrenConfig, env?: WarrenEnv): Warren
   return { ...config, live: env.live || config.live };
 }
 
+/**
+ * Hot-reload: re-read the config file from disk and apply it IN PLACE onto an
+ * existing `WarrenConfig` object (so every closure/consumer that captured the
+ * object by reference — the trigger source, `configFor`, the status route — sees
+ * the new values on the next read). `envRepos` (from `WARREN_REPOS`) are re-merged
+ * onto the file's `repos` so the env-provided watch list survives a reload.
+ *
+ * NB: values captured by VALUE at boot (the poll interval, the queue concurrency)
+ * are not re-applied live — those take effect on a process restart. Per-repo review
+ * policy, auto-review gating, models, path filters, etc. all apply on the next poll.
+ */
+export async function reloadWarrenConfigInto(
+  target: WarrenConfig,
+  filePath: string,
+  env?: WarrenEnv,
+  envRepos: RepoConfig[] = [],
+): Promise<void> {
+  const loaded = await loadWarrenConfig(filePath, env);
+  Object.assign(target, { ...loaded, repos: [...loaded.repos, ...envRepos] });
+}
+
 /** Recursive plain-object deep merge (arrays + scalars from `override` win). */
 export function deepMerge<T>(base: T, override: unknown): T {
   if (override === undefined) return base;

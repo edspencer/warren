@@ -1,9 +1,11 @@
 // test/fake-app.ts — a minimal WarrenApp good enough to exercise the HTTP layer
 // (dashboard API + auth) via Fastify .inject(), without booting the fleet/trigger.
 
+import { join } from "node:path";
+
 import type { WarrenApp } from "../src/container.js";
 import type { WarrenAuthConfig } from "../src/config/env.js";
-import { defaultWarrenConfig } from "../src/config/load.js";
+import { defaultWarrenConfig, reloadWarrenConfigInto } from "../src/config/load.js";
 import { createReviewHistoryStore, type ReviewHistoryStore } from "../src/state/history.js";
 import type { Finding, Logger, ReviewResult, ReviewTarget } from "../src/types.js";
 
@@ -72,6 +74,8 @@ export interface FakeAppOptions {
   repos?: WarrenApp["repos"];
   /** Per-repo config overrides merged into the fake server config's `repos`. */
   config?: Partial<WarrenApp["config"]>;
+  /** Path the config-editing API (#27) reads/writes. Defaults under dataDir. */
+  configPath?: string;
 }
 
 /** Build a fake WarrenApp with a real history store; other deps are stubs. */
@@ -86,23 +90,32 @@ export function makeFakeApp(opts: FakeAppOptions): {
   // endpoints (#19) work; `repos` mirrors the watched list so per-repo overrides
   // resolve. Callers can pass `config` to override top-level fields.
   const config = { ...defaultWarrenConfig(), repos, ...(opts.config ?? {}) };
+  const configPath = opts.configPath ?? join(opts.dataDir, ".warren.yaml");
+  const env = {
+    githubToken: undefined,
+    anthropicApiKey: undefined,
+    runtime: "cli",
+    live: false,
+    port: 5000,
+    host: "0.0.0.0",
+    repos: [],
+    dataDir: opts.dataDir,
+    auth,
+  };
   const app = {
     history,
     dataDir: opts.dataDir,
     repos,
     logger: silentLogger,
-    env: {
-      githubToken: undefined,
-      anthropicApiKey: undefined,
-      runtime: "cli",
-      live: false,
-      port: 5000,
-      host: "0.0.0.0",
-      repos: [],
-      dataDir: opts.dataDir,
-      auth,
-    },
+    env,
     config,
+    configPath,
+    // Mirrors the real container: re-read the file and apply it in place onto
+    // `config` (hot-reload), so config-editing endpoint tests exercise the true
+    // read/write/validate/reload path against a temp file.
+    reloadConfig: async () => {
+      await reloadWarrenConfigInto(config, configPath, env as never, []);
+    },
     queue: { activeCount: () => 0 },
     clientFor: () => null,
   } as unknown as WarrenApp;

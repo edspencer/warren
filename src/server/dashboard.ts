@@ -182,6 +182,58 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   .cfg-v .pi { margin-top: 4px; }
   @media (max-width: 640px) { .cfg-row { grid-template-columns: 1fr; gap: 3px; } }
 
+  /* ---------- Settings / config editor (#27) ---------- */
+  .cfg-form { display: grid; gap: 2px; }
+  .cfg-field {
+    display: grid; grid-template-columns: 190px 1fr; gap: 12px; align-items: center;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+  }
+  .cfg-field:last-child { border-bottom: 0; }
+  .cfg-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
+  .cfg-control { min-width: 0; }
+  .cfg-input {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: 7px 10px; border-radius: 8px; font: inherit;
+  }
+  textarea.cfg-input { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .cfg-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+  .cfg-field input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent-2); }
+  .cfg-group {
+    border: 1px solid var(--border); border-radius: 10px; padding: 6px 14px 10px; margin: 8px 0;
+    background: var(--panel-2);
+  }
+  .cfg-group > legend { color: var(--text); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; padding: 0 6px; }
+  .cfg-group .cfg-field { border-bottom-color: var(--border); }
+  .cfg-yaml {
+    width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 10px; padding: 12px; font-size: 12.5px; line-height: 1.5; resize: vertical; white-space: pre;
+  }
+  .cfg-yaml:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+  .cfg-actions { margin-top: 14px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  .btn-primary {
+    background: var(--accent-2); color: #fff; border: 0; padding: 9px 18px; border-radius: 8px;
+    cursor: pointer; font-size: 13px; font-weight: 600;
+  }
+  .btn-primary:hover { background: var(--accent); }
+  .btn-primary:disabled { background: var(--panel-2); color: var(--muted); cursor: not-allowed; }
+  .btn-ghost {
+    background: transparent; color: var(--muted); border: 1px solid var(--border); padding: 9px 14px;
+    border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  .btn-ghost:hover { color: var(--text); border-color: var(--accent); }
+  .cfg-result { margin: 12px 0 0; }
+  .cfg-result:empty { margin: 0; }
+  .cfg-ok, .cfg-err { border-radius: 10px; padding: 11px 14px; font-size: 13px; }
+  .cfg-ok { border: 1px solid var(--ok); background: rgba(55,178,77,.12); color: var(--ok); }
+  .cfg-err { border: 1px solid var(--crit); background: rgba(255,107,107,.1); color: var(--crit); }
+  .cfg-err ul { margin: 8px 0 0; padding-left: 18px; }
+  .cfg-err li { margin: 2px 0; }
+  .banner-inline.warn {
+    border: 1px solid var(--high); background: rgba(255,159,67,.12); color: var(--high);
+    border-radius: 10px; padding: 11px 14px; font-size: 13px; margin: 10px 0 4px;
+  }
+  @media (max-width: 640px) { .cfg-field { grid-template-columns: 1fr; gap: 4px; align-items: start; } }
+
   /* Error state (#20) — a real, retryable failure surface (not a bare string). */
   .error-box {
     border: 1px solid var(--crit); background: rgba(255,107,107,.1); border-radius: 12px;
@@ -290,6 +342,7 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
     <a href="/" data-link data-view="overview" class="active" aria-current="page">Overview</a>
     <a href="/repos" data-link data-view="repos">Repos</a>
     <a href="/reviews" data-link data-view="reviews">Reviews</a>
+    <a href="/settings" data-link data-view="settings">Settings</a>
   </nav>
   <div class="spacer"></div>
   <div class="token-bar" id="tokenBar">
@@ -323,6 +376,17 @@ async function api(path) {
   if (res.status === 404) throw new Error("not_found");
   if (!res.ok) throw new Error("HTTP " + res.status);
   return res.json();
+}
+
+// Mutating request (config editing, #27). Returns { status, data } instead of
+// throwing on non-2xx so the caller can surface 400 validation details / 401 / 403.
+async function apiSend(path, method, body) {
+  const headers = { "Content-Type": "application/json" };
+  if (state.mode === "jwt" && token()) headers["Authorization"] = "Bearer " + token();
+  const res = await fetch(path, { method: method, headers: headers, body: JSON.stringify(body) });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty/non-JSON body */ }
+  return { status: res.status, data: data };
 }
 
 function showBanner(msg) { if (msg) { banner.textContent = msg; banner.style.display = "block"; } else { banner.style.display = "none"; } }
@@ -761,6 +825,166 @@ function backLink(href, label) {
   return '<a class="back" href="' + (href || "/reviews") + '" data-link>' + (label || "← Back to reviews") + '</a>';
 }
 
+// ─────────────────────────── Settings / config editor (#27) ───────────────────────────
+// Edit the server .warren.yaml from the dashboard. A schema-driven generic form
+// (so newly-added config knobs appear automatically) for scalar/array fields, plus
+// a raw-YAML editor with validate-on-save. Writes require WARREN_AUTH_MODE=jwt.
+
+// Enum-valued fields get a <select> for nicer UX; anything not listed (incl. new
+// schema fields) still renders generically. Keyed by dot-path.
+const CFG_ENUMS = {
+  "profile": ["chill", "assertive"],
+  "min_severity": ["critical", "high", "medium", "low", "nit"],
+  "trigger.mode": ["poll", "webhook", "tunnel"],
+};
+// Complex structures (arrays of objects) don't map to a flat form — edit via YAML.
+const CFG_FORM_SKIP = new Set(["repos", "path_instructions"]);
+
+function cfgIsPrim(v) { return v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean"; }
+function cfgIsPrimArray(v) { return Array.isArray(v) && v.every(cfgIsPrim); }
+
+// One labelled control for a scalar / primitive-array value at a dot-path.
+function cfgControl(dotPath, label, value) {
+  const p = esc(dotPath);
+  let ctrl;
+  if (typeof value === "boolean") {
+    ctrl = '<input type="checkbox" data-path="' + p + '" data-vtype="bool"' + (value ? " checked" : "") + ' />';
+  } else if (cfgIsPrimArray(value)) {
+    const rows = Math.min(8, Math.max(2, (value || []).length + 1));
+    ctrl = '<textarea class="cfg-input" data-path="' + p + '" data-vtype="array" rows="' + rows +
+      '" placeholder="one value per line" spellcheck="false">' + esc((value || []).join("\n")) + '</textarea>';
+  } else if (CFG_ENUMS[dotPath]) {
+    ctrl = '<select class="cfg-input" data-path="' + p + '" data-vtype="string">' +
+      CFG_ENUMS[dotPath].map(function (o) {
+        return '<option' + (String(value) === o ? " selected" : "") + '>' + esc(o) + '</option>';
+      }).join("") + '</select>';
+  } else if (typeof value === "number") {
+    ctrl = '<input class="cfg-input" type="number" data-path="' + p + '" data-vtype="number" value="' + esc(value) + '" />';
+  } else {
+    ctrl = '<input class="cfg-input" type="text" data-path="' + p + '" data-vtype="string" value="' + esc(value == null ? "" : value) + '" />';
+  }
+  return '<div class="cfg-field"><label class="cfg-label">' + esc(label) + '</label><div class="cfg-control">' + ctrl + '</div></div>';
+}
+
+// Walk the structured config → controls. Top-level scalars/arrays render directly;
+// nested objects render as a fieldset of their scalar/array leaves; arrays of
+// objects (repos, path_instructions) are left to the YAML editor.
+function renderConfigForm(cfg) {
+  let html = "";
+  Object.keys(cfg).forEach(function (key) {
+    if (CFG_FORM_SKIP.has(key)) return;
+    const v = cfg[key];
+    if (cfgIsPrim(v) || cfgIsPrimArray(v)) {
+      html += cfgControl(key, key, v);
+    } else if (v && typeof v === "object" && !Array.isArray(v)) {
+      let sub = "";
+      Object.keys(v).forEach(function (sk) {
+        const sv = v[sk];
+        if (cfgIsPrim(sv) || cfgIsPrimArray(sv)) sub += cfgControl(key + "." + sk, sk, sv);
+      });
+      if (sub) html += '<fieldset class="cfg-group"><legend>' + esc(key) + '</legend>' + sub + '</fieldset>';
+    }
+  });
+  return html;
+}
+
+function cfgSetPath(obj, dotPath, val) {
+  const parts = dotPath.split(".");
+  let o = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (o[parts[i]] == null || typeof o[parts[i]] !== "object") o[parts[i]] = {};
+    o = o[parts[i]];
+  }
+  o[parts[parts.length - 1]] = val;
+}
+
+// Reconstruct a full config object from the form, starting from the last-loaded
+// config so complex un-formed fields (repos, path_instructions) are preserved.
+function readConfigForm(root, base) {
+  const out = (typeof structuredClone === "function") ? structuredClone(base) : JSON.parse(JSON.stringify(base));
+  root.querySelectorAll("#cfgForm [data-path]").forEach(function (el) {
+    const p = el.getAttribute("data-path");
+    const vtype = el.getAttribute("data-vtype");
+    let val;
+    if (vtype === "bool") val = el.checked;
+    else if (vtype === "number") val = el.value.trim() === "" ? null : Number(el.value);
+    else if (vtype === "array") val = el.value.split("\n").map(function (s) { return s.trim(); }).filter(function (s) { return s.length > 0; });
+    else val = el.value;
+    cfgSetPath(out, p, val);
+  });
+  return out;
+}
+
+async function renderSettings() {
+  const data = await api("/api/config");
+  const cfg = data.config;
+  const editable = data.editable;
+  const notice = editable ? "" :
+    '<div class="banner-inline warn">Editing is disabled — set <span class="mono">WARREN_AUTH_MODE=jwt</span> and enter a valid bearer token above to save changes. You can still view the current configuration.</div>';
+  const html =
+    '<h2>Settings <span class="muted" style="font-weight:400">— configuration</span></h2>' +
+    '<p class="muted" style="margin-top:-8px">Backed by <span class="mono">' + esc(data.path) + '</span>' +
+      (data.exists ? "" : ' <span class="muted">(not yet created — showing defaults)</span>') +
+      '. Secrets are configured via environment variables, never here.</p>' +
+    notice +
+    '<div id="cfgResult" class="cfg-result" role="status" aria-live="polite"></div>' +
+    '<div class="panel"><h3>Configuration</h3>' +
+      '<form id="cfgForm" class="cfg-form">' + renderConfigForm(cfg) + '</form>' +
+      '<div class="cfg-actions"><button type="button" id="cfgSaveForm" class="btn-primary"' + (editable ? "" : " disabled") + '>Save configuration</button>' +
+        '<span class="muted">Complex fields (repos, path instructions) are edited in the YAML below.</span></div>' +
+    '</div>' +
+    '<div class="panel"><h3>Raw <span class="mono" style="text-transform:none;letter-spacing:0">' + esc(data.path) + '</span></h3>' +
+      '<textarea id="cfgYaml" class="cfg-yaml" spellcheck="false" rows="18" aria-label="Raw YAML config">' + esc(data.raw) + '</textarea>' +
+      '<div class="cfg-actions"><button type="button" id="cfgSaveYaml" class="btn-primary"' + (editable ? "" : " disabled") + '>Save YAML</button>' +
+        '<button type="button" id="cfgReset" class="btn-ghost">Reset</button></div>' +
+    '</div>';
+  return { html: html, wire: function (root) { wireSettings(root, cfg, data.raw); } };
+}
+
+function wireSettings(root, loadedCfg, loadedRaw) {
+  const result = root.querySelector("#cfgResult");
+  function show(kind, msg, details) {
+    let h = '<div class="' + (kind === "ok" ? "cfg-ok" : "cfg-err") + '">' + esc(msg);
+    if (details && details.length) {
+      h += '<ul>' + details.map(function (d) {
+        return '<li>' + (d.path ? '<span class="mono">' + esc(d.path) + '</span>: ' : '') + esc(d.message) + '</li>';
+      }).join("") + '</ul>';
+    }
+    h += '</div>';
+    result.innerHTML = h;
+  }
+  async function submit(body) {
+    show("ok", "Saving…");
+    try {
+      const r = await apiSend("/api/config", "PUT", body);
+      if (r.status === 200) {
+        show("ok", "Saved — configuration validated and applied.");
+        setTimeout(function () { render(); }, 700); // re-fetch to show the reloaded config
+      } else if (r.status === 400) {
+        show("err", (r.data && r.data.error) || "Validation failed.", r.data && r.data.details);
+      } else if (r.status === 401) {
+        show("err", "Authentication required — enter a valid bearer token above, then retry.");
+        showTokenBar(true);
+      } else if (r.status === 403) {
+        show("err", (r.data && r.data.error) || "Config editing is disabled (auth mode is not jwt).");
+      } else {
+        show("err", "Save failed (HTTP " + r.status + ").");
+      }
+    } catch (e) {
+      show("err", "Save failed: " + e.message);
+    }
+  }
+  const sf = root.querySelector("#cfgSaveForm");
+  if (sf) sf.addEventListener("click", function () { submit({ config: readConfigForm(root, loadedCfg) }); });
+  const sy = root.querySelector("#cfgSaveYaml");
+  if (sy) sy.addEventListener("click", function () { submit({ yaml: root.querySelector("#cfgYaml").value }); });
+  const rs = root.querySelector("#cfgReset");
+  if (rs) rs.addEventListener("click", function () {
+    root.querySelector("#cfgYaml").value = loadedRaw;
+    show("ok", "Reverted the YAML editor to the last-loaded config (not yet saved).");
+  });
+}
+
 // ─────────────────────────────── skeletons ───────────────────────────────
 function skCards(n) {
   return '<div class="cards">' + Array.from({ length: n }).map(() =>
@@ -781,6 +1005,10 @@ function skList(title) {
 function skDetail() {
   return backLink() + skCards(5) + '<div class="panel">' + skRows(4) + '</div>';
 }
+function skSettings() {
+  return '<h2>Settings</h2><div class="panel">' + skRows(6) + '</div>' +
+    '<div class="panel"><div class="skeleton" style="height:280px"></div></div>';
+}
 
 // ─────────────────────────────── router ───────────────────────────────
 const routes = [
@@ -790,6 +1018,7 @@ const routes = [
   { name: "findings", re: /^\/findings\/?$/, load: renderFindings, skeleton: () => skList("Findings") },
   { name: "reviews", re: /^\/reviews\/?$/, load: renderReviews, skeleton: () => skList("Reviews") },
   { name: "reviewDetail", re: /^\/reviews\/([^/]+)\/?$/, load: (m) => renderReviewDetail(decodeURIComponent(m[1])), skeleton: () => skDetail() },
+  { name: "settings", re: /^\/settings\/?$/, load: renderSettings, skeleton: () => skSettings() },
 ];
 
 /** Nav highlight key for a route (detail views roll up under their section). */
