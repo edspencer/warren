@@ -36,6 +36,8 @@ export interface PrInfo {
   state: "open" | "closed";
   author: string;
   htmlUrl: string;
+  /** Label names on the PR (used by trigger label gating). */
+  labels: string[];
 }
 
 export interface PrFile {
@@ -775,6 +777,7 @@ interface RawPull {
   user: { login: string } | null;
   head: { sha: string; ref: string };
   base: { sha: string; ref: string };
+  labels?: Array<{ name: string }>;
 }
 interface RawFile {
   filename: string;
@@ -809,6 +812,7 @@ function toPrInfo(p: RawPull): PrInfo {
     state: p.state,
     author: p.user?.login ?? "",
     htmlUrl: p.html_url,
+    labels: (p.labels ?? []).map((l) => l.name).filter(Boolean),
   };
 }
 

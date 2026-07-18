@@ -173,6 +173,36 @@ export interface WarrenConfig {
     // (default) = no author gating — every author is reviewed (legacy behavior).
     // Also gates @warren command-triggered reviews on the same PR-author policy.
     authors: string[];
+    // Author DENYlist (case-insensitive): PRs by these logins are never
+    // auto-reviewed AND their @warren commands are ignored. Complements `authors`;
+    // deny wins over allow. Empty (default) = no denial. Use for noisy bots.
+    denyAuthors: string[];
+    // Skip pure version/release-churn PRs (title/branch/author heuristics +
+    // release-only diff). Default true — see trigger/policy.ts for the built-ins.
+    skipReleasePrs: boolean;
+    // Additive custom release heuristics (on top of the built-in defaults).
+    releaseTitlePatterns: string[]; // regex (case-insensitive) OR literal substring
+    releaseBranchPatterns: string[];
+    releaseAuthors: string[]; // extra login(s) treated as release bots
+    // Label gating. A PR carrying ANY `skipLabels` label is skipped. When
+    // `onlyLabels` is NON-EMPTY, a PR is auto-reviewed ONLY if it carries at
+    // least one of them. Both empty except skipLabels defaults to [warren:skip].
+    skipLabels: string[];
+    onlyLabels: string[];
+    // Ignore-pattern gates: a PR whose title/branch matches any of these is
+    // skipped for AUTO review (explicit @warren commands still work). Empty default.
+    skipTitlePatterns: string[];
+    skipBranchPatterns: string[];
+  };
+  // Per-repo review policy levers (cost/aggression). See review/policy.ts.
+  review: {
+    // Effort knob: maps to whether triage runs, verify on/off, and the reviewer
+    // turn budget (a reasoning-effort proxy — herdctl has no native effort field).
+    effort: "low" | "normal" | "high";
+    // Soft budget ceilings. 0 = no cap. A PR exceeding either is skipped (logged)
+    // rather than reviewed, so a giant/generated diff can't blow the token budget.
+    maxFiles: number;
+    maxTokens: number; // estimated from diff size (~chars/4)
   };
   pathFilters: string[]; // gitignore-style; "!" prefix = exclude
   pathInstructions: Array<{ path: string; instructions: string }>;

@@ -75,6 +75,31 @@ const WarrenConfigRawZ = z.object({
       // @warren commands on other authors' PRs are ignored. Safety guard so a
       // fresh install can be scoped to just the owner's own login while testing.
       authors: z.array(z.string()).default([]),
+      // Author DENYlist (case-insensitive). Deny wins over allow. Empty = none.
+      deny_authors: z.array(z.string()).default([]),
+      // Skip pure release/version-churn PRs (default ON). See trigger/policy.ts.
+      skip_release_prs: z.boolean().default(true),
+      // Additive custom release heuristics (on top of the built-in defaults).
+      release_title_patterns: z.array(z.string()).default([]),
+      release_branch_patterns: z.array(z.string()).default([]),
+      release_authors: z.array(z.string()).default([]),
+      // Label gating. Skip any PR carrying a skip label; when only_labels is set,
+      // require at least one of them. Default skip label: `warren:skip`.
+      skip_labels: z.array(z.string()).default(["warren:skip"]),
+      only_labels: z.array(z.string()).default([]),
+      // Ignore-pattern gates for AUTO review (explicit @warren commands still run).
+      skip_title_patterns: z.array(z.string()).default([]),
+      skip_branch_patterns: z.array(z.string()).default([]),
+    })
+    .default({}),
+  // Per-repo review policy levers (cost/aggression).
+  review: z
+    .object({
+      // low | normal (default) | high — controls triage/verify passes + turn budget.
+      effort: z.enum(["low", "normal", "high"]).default("normal"),
+      // Soft budget ceilings; 0 = no cap. A PR over the cap is skipped, not reviewed.
+      max_files: z.number().int().nonnegative().default(0),
+      max_tokens: z.number().int().nonnegative().default(0),
     })
     .default({}),
   path_filters: z
@@ -170,6 +195,20 @@ export function toWarrenConfig(raw: WarrenConfigRaw): WarrenConfig {
       drafts: raw.auto_review.drafts,
       baseBranches: raw.auto_review.base_branches,
       authors: raw.auto_review.authors,
+      denyAuthors: raw.auto_review.deny_authors,
+      skipReleasePrs: raw.auto_review.skip_release_prs,
+      releaseTitlePatterns: raw.auto_review.release_title_patterns,
+      releaseBranchPatterns: raw.auto_review.release_branch_patterns,
+      releaseAuthors: raw.auto_review.release_authors,
+      skipLabels: raw.auto_review.skip_labels,
+      onlyLabels: raw.auto_review.only_labels,
+      skipTitlePatterns: raw.auto_review.skip_title_patterns,
+      skipBranchPatterns: raw.auto_review.skip_branch_patterns,
+    },
+    review: {
+      effort: raw.review.effort,
+      maxFiles: raw.review.max_files,
+      maxTokens: raw.review.max_tokens,
     },
     pathFilters: raw.path_filters,
     pathInstructions: raw.path_instructions.map((p) => ({

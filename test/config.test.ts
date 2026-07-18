@@ -29,6 +29,16 @@ describe("config schema + load", () => {
     expect(cfg.autoReview.enabled).toBe(true);
     expect(cfg.autoReview.baseBranches).toEqual(["main"]);
     expect(cfg.autoReview.authors).toEqual([]); // no author gating by default
+    // #26 filter defaults
+    expect(cfg.autoReview.denyAuthors).toEqual([]);
+    expect(cfg.autoReview.skipReleasePrs).toBe(true); // skip release PRs by default
+    expect(cfg.autoReview.skipLabels).toEqual(["warren:skip"]);
+    expect(cfg.autoReview.onlyLabels).toEqual([]);
+    expect(cfg.autoReview.releaseTitlePatterns).toEqual([]);
+    // #26 review policy defaults (no cap, normal effort)
+    expect(cfg.review.effort).toBe("normal");
+    expect(cfg.review.maxFiles).toBe(0);
+    expect(cfg.review.maxTokens).toBe(0);
     expect(cfg.live).toBe(false); // dry-run default
     expect(cfg.concurrency).toBe(3);
     expect(cfg.repos).toEqual([]);
@@ -88,6 +98,51 @@ describe("config schema + load", () => {
     const resolved = resolveRepoConfig(cfg, cfg.repos[0]);
     expect(resolved.minSeverity).toBe("low");
     expect(resolved.profile).toBe("assertive"); // inherited from server
+  });
+
+  it("parses #26 trigger filters + review policy (snake -> camel) with per-repo override", async () => {
+    const yaml = [
+      "auto_review:",
+      "  deny_authors: [noisybot]",
+      "  skip_release_prs: false",
+      "  release_title_patterns: ['^chore: bump']",
+      "  skip_labels: [wip, warren:skip]",
+      "  only_labels: [needs-review]",
+      "  skip_branch_patterns: ['^wip/']",
+      "review:",
+      "  effort: high",
+      "  max_files: 40",
+      "  max_tokens: 120000",
+      "repos:",
+      "  - github: { owner: acme, name: widgets }",
+      "    overrides:",
+      "      review:",
+      "        effort: low",
+      "",
+    ].join("\n");
+    const p = join(dir, "filters.warren.yaml");
+    await writeFile(p, yaml, "utf8");
+
+    const cfg = await loadWarrenConfig(p);
+    expect(cfg.autoReview.denyAuthors).toEqual(["noisybot"]);
+    expect(cfg.autoReview.skipReleasePrs).toBe(false);
+    expect(cfg.autoReview.releaseTitlePatterns).toEqual(["^chore: bump"]);
+    expect(cfg.autoReview.skipLabels).toEqual(["wip", "warren:skip"]);
+    expect(cfg.autoReview.onlyLabels).toEqual(["needs-review"]);
+    expect(cfg.autoReview.skipBranchPatterns).toEqual(["^wip/"]);
+    expect(cfg.review.effort).toBe("high");
+    expect(cfg.review.maxFiles).toBe(40);
+    expect(cfg.review.maxTokens).toBe(120000);
+
+    // per-repo override deep-merges: effort=low wins, but server max_files persists.
+    const resolved = resolveRepoConfig(cfg, cfg.repos[0]);
+    expect(resolved.review.effort).toBe("low");
+    expect(resolved.review.maxFiles).toBe(40);
+    expect(resolved.autoReview.onlyLabels).toEqual(["needs-review"]);
+  });
+
+  it("rejects an invalid review.effort value", () => {
+    expect(() => WarrenConfigZ.parse({ review: { effort: "ludicrous" } })).toThrow();
   });
 
   it("rejects an invalid enum value", () => {

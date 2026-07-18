@@ -28,21 +28,13 @@ import type {
 import { repoLabel, targetKey } from "../types.js";
 import type { PrInfo } from "../github/client.js";
 import { parseWarrenCommand } from "./commands.js";
+import { autoReviewDecision, commandAllowed } from "./policy.js";
 import type { TriggerSource, TriggerSourceDeps } from "./source.js";
 
 type EmitFn = (e: ReviewEvent) => void;
 
-/**
- * Author allowlist gate (SAFETY, issue #21). Returns true when `login` is allowed
- * to be reviewed/commented on. An empty allowlist means no gating — everyone is
- * allowed (legacy behavior). Matching is case-insensitive (GitHub logins are).
- */
-export function isAuthorAllowed(login: string | undefined, authors: string[]): boolean {
-  if (authors.length === 0) return true;
-  if (!login) return false;
-  const want = login.toLowerCase();
-  return authors.some((a) => a.toLowerCase() === want);
-}
+// Re-exported for backward compatibility; the canonical home is trigger/policy.ts.
+export { isAuthorAllowed } from "./policy.js";
 
 export class PollTriggerSource implements TriggerSource {
   private readonly deps: TriggerSourceDeps;
@@ -188,13 +180,15 @@ export class PollTriggerSource implements TriggerSource {
         this.logger.info(`poll: resumed ${key} via @warren resume`);
         continue;
       }
-      // SAFETY (#21): apply the SAME author allowlist to @warren command-triggered
-      // reviews/answers — gate on the PR AUTHOR (whose PR gets reviewed/commented
-      // on), not the commenter. Pause/resume above are harmless state ops and are
-      // left ungated. Empty allowlist = allow everyone (legacy behavior).
-      if (!isAuthorAllowed(pr.author, cfg.autoReview.authors)) {
+      // SAFETY (#21/#26): apply the AUTHOR allow/deny policy to @warren
+      // command-triggered reviews/answers — gate on the PR AUTHOR (whose PR gets
+      // reviewed/commented on), not the commenter. Pause/resume above are harmless
+      // state ops and are left ungated. Scope/noise filters (labels, title/branch
+      // ignore, release skip, drafts) do NOT block an explicit human command —
+      // a maintainer who asks for a review has opted in. Empty gates = allow all.
+      if (!commandAllowed(pr, cfg.autoReview)) {
         this.logger.debug(
-          `poll: PR author '${pr.author}' not on auto_review.authors allowlist; ignoring @warren '${cmd.kind}' on ${key}`,
+          `poll: PR author '${pr.author}' blocked by author policy; ignoring @warren '${cmd.kind}' on ${key}`,
         );
         continue;
       }
@@ -227,12 +221,12 @@ export class PollTriggerSource implements TriggerSource {
     if (!cfg.autoReview.enabled) return;
     if (pr.draft && !cfg.autoReview.drafts) return;
     if (!cfg.autoReview.baseBranches.includes(pr.baseRef)) return;
-    // SAFETY (#21): never auto-review/comment on a PR whose author is not on the
-    // allowlist. Empty allowlist = review everyone (legacy behavior).
-    if (!isAuthorAllowed(pr.author, cfg.autoReview.authors)) {
-      this.logger.debug(
-        `poll: PR author '${pr.author}' not on auto_review.authors allowlist; skipping ${key}`,
-      );
+    // Trigger policy (#21/#26): author allow/deny, label gating, title/branch
+    // ignore patterns, and the release-PR skip. Empty/default config allows every
+    // non-release PR (legacy behavior save for the default release skip).
+    const decision = autoReviewDecision(pr, cfg.autoReview);
+    if (!decision.allow) {
+      this.logger.debug(`poll: skipping ${key} — ${decision.reason}`);
       return;
     }
 

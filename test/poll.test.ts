@@ -29,6 +29,7 @@ function pr(over: Partial<PrInfo> = {}): PrInfo {
     state: "open",
     author: "alice",
     htmlUrl: "https://github.com/acme/widgets/pull/1",
+    labels: [],
     ...over,
   };
 }
@@ -56,12 +57,33 @@ function fakeClient(prs: PrInfo[], commentsByPr: Record<number, IssueComment[]> 
   } as unknown as GitHubClient;
 }
 
+/** Build a full autoReview block from a partial (fills the #26 filter defaults). */
+function ar(over: Partial<WarrenConfig["autoReview"]> = {}): WarrenConfig["autoReview"] {
+  return {
+    enabled: true,
+    drafts: false,
+    baseBranches: ["main"],
+    authors: [],
+    denyAuthors: [],
+    skipReleasePrs: true,
+    releaseTitlePatterns: [],
+    releaseBranchPatterns: [],
+    releaseAuthors: [],
+    skipLabels: ["warren:skip"],
+    onlyLabels: [],
+    skipTitlePatterns: [],
+    skipBranchPatterns: [],
+    ...over,
+  };
+}
+
 function config(over: Partial<WarrenConfig> = {}): WarrenConfig {
   return {
     profile: "chill",
     minSeverity: "medium",
     trigger: { mode: "poll", pollIntervalMs: 60_000 },
-    autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: [] },
+    autoReview: ar(),
+    review: { effort: "normal", maxFiles: 0, maxTokens: 0 },
     pathFilters: [],
     pathInstructions: [],
     walkthrough: { sequenceDiagrams: false, poem: false },
@@ -252,7 +274,7 @@ describe("PollTriggerSource (github)", () => {
         client: fakeClient([pr({ author: "Alice" })]),
         // Different casing than the PR author to prove the match is case-insensitive.
         config: config({
-          autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: ["alice"] },
+          autoReview: ar({ authors: ["alice"] }),
         }),
       }),
     );
@@ -268,7 +290,7 @@ describe("PollTriggerSource (github)", () => {
       deps({
         client: fakeClient([pr({ author: "mallory" })]),
         config: config({
-          autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: ["alice"] },
+          autoReview: ar({ authors: ["alice"] }),
         }),
       }),
     );
@@ -283,7 +305,7 @@ describe("PollTriggerSource (github)", () => {
       deps({
         client: fakeClient([pr({ author: "anyone" })]),
         config: config({
-          autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: [] },
+          autoReview: ar({ authors: [] }),
         }),
       }),
     );
@@ -307,7 +329,7 @@ describe("PollTriggerSource (github)", () => {
           1: [comment({ id: 9, author: "mallory", body: "@warren review" })],
         }),
         config: config({
-          autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: ["alice"] },
+          autoReview: ar({ authors: ["alice"] }),
         }),
       }),
     );
@@ -330,7 +352,7 @@ describe("PollTriggerSource (github)", () => {
           1: [comment({ id: 9, author: "alice", body: "@warren review" })],
         }),
         config: config({
-          autoReview: { enabled: true, drafts: false, baseBranches: ["main"], authors: ["alice"] },
+          autoReview: ar({ authors: ["alice"] }),
         }),
       }),
     );
@@ -356,6 +378,104 @@ describe("PollTriggerSource (github)", () => {
     );
     await src.tick((e) => events.push(e));
     expect(events).toHaveLength(0);
+  });
+
+  it("skip_release_prs: skips a release PR (by title) but honors an explicit @warren command", async () => {
+    const state = createReviewStateStore(dataDir);
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        state,
+        client: fakeClient([pr({ headSha: "sha1", title: "chore: version packages" })], {
+          1: [comment({ id: 4, author: "alice", body: "@warren review" })],
+        }),
+        config: config(),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+    // No auto-review (release PR), but the explicit command still fires.
+    expect(events).toHaveLength(1);
+    expect(events[0]!.reason).toBe("command");
+  });
+
+  it("skip_release_prs=false: a release PR IS auto-reviewed", async () => {
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        client: fakeClient([pr({ title: "chore: version packages" })]),
+        config: config({ autoReview: ar({ skipReleasePrs: false }) }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+    expect(events).toHaveLength(1);
+    expect(events[0]!.reason).toBe("new_pr");
+  });
+
+  it("deny_authors: skips a denied author's PR and ignores its @warren command", async () => {
+    const state = createReviewStateStore(dataDir);
+    await state.setPrState(KEY, (s) => ({ ...s, lastReviewedSha: "sha1" }));
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        state,
+        client: fakeClient([pr({ headSha: "sha1", author: "noisybot" })], {
+          1: [comment({ id: 7, author: "noisybot", body: "@warren review" })],
+        }),
+        config: config({ autoReview: ar({ denyAuthors: ["noisybot"] }) }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+    expect(events).toHaveLength(0);
+  });
+
+  it("skip_labels: a warren:skip label suppresses auto review", async () => {
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        client: fakeClient([pr({ labels: ["warren:skip"] })]),
+        config: config(),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+    expect(events).toHaveLength(0);
+  });
+
+  it("only_labels: auto-reviews only PRs carrying a required label", async () => {
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        client: fakeClient([
+          pr({ number: 1, headSha: "s1", labels: [] }),
+          pr({ number: 2, headSha: "s2", labels: ["needs-review"] }),
+        ]),
+        config: config({ autoReview: ar({ onlyLabels: ["needs-review"] }) }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+    expect(events).toHaveLength(1);
+    expect((events[0]!.target as { prNumber: number }).prNumber).toBe(2);
+  });
+
+  it("only_labels: an explicit @warren command STILL runs on an unlabeled PR (scope filter bypassed)", async () => {
+    const state = createReviewStateStore(dataDir);
+    // Pre-seed lastReviewedSha === head so ONLY the command path can fire.
+    await state.setPrState(KEY, (s) => ({ ...s, lastReviewedSha: "sha1" }));
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        state,
+        // PR lacks the required `needs-review` label → no AUTO review, but the
+        // maintainer's explicit @warren review must still be honored.
+        client: fakeClient([pr({ headSha: "sha1", labels: [] })], {
+          1: [comment({ id: 8, author: "alice", body: "@warren review" })],
+        }),
+        config: config({ autoReview: ar({ onlyLabels: ["needs-review"] }) }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+    expect(events).toHaveLength(1);
+    expect(events[0]!.reason).toBe("command");
+    expect(events[0]!.command?.kind).toBe("review");
   });
 });
 

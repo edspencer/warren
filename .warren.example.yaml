@@ -36,6 +36,45 @@ auto_review:
   # by these logins — and @warren commands on other authors' PRs are ignored.
   # Scope a fresh install to just yourself while testing, e.g. [your-login].
   authors: []
+  # DENYlist of PR author logins (case-insensitive). Complements `authors`; deny
+  # wins over allow. Empty (default) = deny no one. Use to silence a noisy bot.
+  deny_authors: []          # e.g. [dependabot[bot]]
+
+  # Skip mechanical/release PRs (default true): pure version/release churn by
+  # title (e.g. "chore: version packages"), branch (e.g. changeset-release/*),
+  # a known release-bot author, OR a diff that only touches lockfiles / CHANGELOG
+  # / .changeset/**. An explicit `@warren review` still reviews such a PR.
+  skip_release_prs: true
+  # Additive custom release heuristics (appended to the built-in defaults). Each
+  # pattern is a case-insensitive regex (falls back to a substring match).
+  release_title_patterns: []   # e.g. ['^chore: bump']
+  release_branch_patterns: []  # e.g ['^auto-update/']
+  release_authors: []          # e.g. [my-release-bot]
+
+  # Label gating for AUTO review. A PR carrying ANY of `skip_labels` is skipped;
+  # when `only_labels` is non-empty, a PR is auto-reviewed ONLY if it carries at
+  # least one of them. These are SCOPE filters — an explicit `@warren review`
+  # still runs regardless (only the author allow/deny lists gate commands).
+  skip_labels: [warren:skip]
+  only_labels: []
+  # Ignore-pattern gates for AUTO review only (explicit @warren commands still run).
+  skip_title_patterns: []   # e.g. ['^wip:', '\\[skip review\\]']
+  skip_branch_patterns: []  # e.g. ['^wip/']
+
+# Per-repo review policy levers (cost vs. aggression). Override per repo below.
+review:
+  # Effort knob: low | normal (default) | high.
+  #   low    — cheapest: no triage, NO verify pass, tight reviewer turn budget.
+  #   normal — verify pass ON (precision), standard budget.
+  #   high   — thorough: triage + verify ON, generous turn budget.
+  # (A reasoning-effort proxy — herdctl has no native reasoning-effort field, so
+  #  effort is spent as passes + turn budget.)
+  effort: normal
+  # Soft budget ceilings; 0 = no cap. A PR exceeding either is SKIPPED (not
+  # reviewed) so a giant/generated diff can't blow the token budget. `max_tokens`
+  # is estimated from the diff size (~4 chars/token).
+  max_files: 0
+  max_tokens: 0
 
 # Glob filters applied to changed files. `!` negates (exclude). Defaults exclude
 # build output, lockfiles, and vendored deps.
