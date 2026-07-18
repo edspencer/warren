@@ -151,14 +151,18 @@ export interface AutoReviewDecision {
 }
 
 /**
- * Whether an explicit @warren command on this PR is honored. Gated on author
- * allow/deny + label policy only — release/ignore heuristics do NOT block a human's
- * explicit request. Pause/resume are handled upstream and are always allowed.
+ * Whether an explicit @warren command on this PR is honored. Gated on AUTHOR
+ * POLICY ONLY (allow/denylist) — a permission/safety gate. The scope/noise
+ * filters (label gating, title/branch ignore patterns, release-PR skip, drafts)
+ * exist to keep AUTO review quiet; a maintainer who explicitly types `@warren
+ * review` has opted in, so those filters must NOT silently drop the request
+ * (e.g. `only_labels` set + an unlabeled PR still gets a manual review). Only the
+ * author allow/deny gate — which is a documented permission control — applies here.
+ * Pause/resume are handled upstream and are always allowed.
  */
 export function commandAllowed(pr: PrLike, ar: AutoReview): boolean {
   if (isAuthorDenied(pr.author, ar.denyAuthors)) return false;
   if (!isAuthorAllowed(pr.author, ar.authors)) return false;
-  if (!labelGateAllows(pr.labels, ar.skipLabels, ar.onlyLabels)) return false;
   return true;
 }
 

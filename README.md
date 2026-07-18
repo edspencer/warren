@@ -186,8 +186,8 @@ commented starter. Keys are snake_case on disk.
 | `auto_review.deny_authors` | `[]` | **Denylist** of PR author logins (case-insensitive). Deny wins over allow; also gates `@warren` commands. Silence noisy bots. |
 | `auto_review.skip_release_prs` | `true` | Skip mechanical release/version PRs (by title/branch/author, or a lockfile/`CHANGELOG`/`.changeset`-only diff). Explicit `@warren review` still runs. |
 | `auto_review.release_title_patterns` / `.release_branch_patterns` / `.release_authors` | `[]` | **Additive** custom release heuristics (regex, case-insensitive) on top of the built-in defaults. |
-| `auto_review.skip_labels` | `[warren:skip]` | Skip any PR carrying one of these labels. |
-| `auto_review.only_labels` | `[]` | When set, auto-review a PR **only** if it carries one of these labels. |
+| `auto_review.skip_labels` | `[warren:skip]` | Skip **auto-review** of any PR carrying one of these labels (explicit `@warren` commands still run). |
+| `auto_review.only_labels` | `[]` | When set, **auto-review** a PR only if it carries one of these labels (explicit `@warren` commands still run). |
 | `auto_review.skip_title_patterns` / `.skip_branch_patterns` | `[]` | Ignore patterns (regex) for AUTO review; explicit `@warren` commands still run. |
 | `review.effort` | `normal` | `low` (no triage/verify, tight budget), `normal` (verify on), `high` (triage + verify, generous budget). Reasoning-effort proxy. |
 | `review.max_files` | `0` | Soft ceiling: skip a PR whose changed-file count exceeds this (`0` = no cap). |

@@ -455,6 +455,28 @@ describe("PollTriggerSource (github)", () => {
     expect(events).toHaveLength(1);
     expect((events[0]!.target as { prNumber: number }).prNumber).toBe(2);
   });
+
+  it("only_labels: an explicit @warren command STILL runs on an unlabeled PR (scope filter bypassed)", async () => {
+    const state = createReviewStateStore(dataDir);
+    // Pre-seed lastReviewedSha === head so ONLY the command path can fire.
+    await state.setPrState(KEY, (s) => ({ ...s, lastReviewedSha: "sha1" }));
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        state,
+        // PR lacks the required `needs-review` label → no AUTO review, but the
+        // maintainer's explicit @warren review must still be honored.
+        client: fakeClient([pr({ headSha: "sha1", labels: [] })], {
+          1: [comment({ id: 8, author: "alice", body: "@warren review" })],
+        }),
+        config: config({ autoReview: ar({ onlyLabels: ["needs-review"] }) }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+    expect(events).toHaveLength(1);
+    expect(events[0]!.reason).toBe("command");
+    expect(events[0]!.command?.kind).toBe("review");
+  });
 });
 
 describe("PollTriggerSource (local-git)", () => {

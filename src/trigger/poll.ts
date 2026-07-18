@@ -180,14 +180,15 @@ export class PollTriggerSource implements TriggerSource {
         this.logger.info(`poll: resumed ${key} via @warren resume`);
         continue;
       }
-      // SAFETY (#21/#26): apply author allow/deny + label policy to @warren
+      // SAFETY (#21/#26): apply the AUTHOR allow/deny policy to @warren
       // command-triggered reviews/answers — gate on the PR AUTHOR (whose PR gets
       // reviewed/commented on), not the commenter. Pause/resume above are harmless
-      // state ops and are left ungated. Release/ignore heuristics do NOT block an
-      // explicit human command. Empty gates = allow everyone (legacy behavior).
+      // state ops and are left ungated. Scope/noise filters (labels, title/branch
+      // ignore, release skip, drafts) do NOT block an explicit human command —
+      // a maintainer who asks for a review has opted in. Empty gates = allow all.
       if (!commandAllowed(pr, cfg.autoReview)) {
         this.logger.debug(
-          `poll: PR author '${pr.author}' blocked by author/label policy; ignoring @warren '${cmd.kind}' on ${key}`,
+          `poll: PR author '${pr.author}' blocked by author policy; ignoring @warren '${cmd.kind}' on ${key}`,
         );
         continue;
       }

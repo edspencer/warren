@@ -111,13 +111,18 @@ describe("trigger/policy — combined decisions", () => {
     expect(autoReviewDecision(prLike({ title: "chore: version packages" }), ar({ skipReleasePrs: false })).allow).toBe(true);
   });
 
-  it("commandAllowed: gated on author/label only, NOT release/ignore heuristics", () => {
+  it("commandAllowed: gated on AUTHOR policy only — scope/noise filters never block a human command", () => {
     // A release-looking PR still accepts an explicit command.
     expect(commandAllowed(prLike({ title: "chore: version packages" }), ar())).toBe(true);
-    // Denied author / skip label still block commands.
+    // Scope/noise filters do NOT block an explicit @warren command:
+    //  • a warren:skip label,
+    expect(commandAllowed(prLike({ labels: ["warren:skip"] }), ar())).toBe(true);
+    //  • only_labels set + an unlabeled PR (the "auto-scoped, manual-on-demand" workflow),
+    expect(commandAllowed(prLike({ labels: [] }), ar({ onlyLabels: ["needs-review"] }))).toBe(true);
+    //  • a skip title/branch pattern.
+    expect(commandAllowed(prLike({ title: "WIP: x" }), ar({ skipTitlePatterns: ["^wip:"] }))).toBe(true);
+    // But AUTHOR policy (permission/safety) still gates commands:
     expect(commandAllowed(prLike({ author: "noisybot" }), ar({ denyAuthors: ["noisybot"] }))).toBe(false);
-    expect(commandAllowed(prLike({ labels: ["warren:skip"] }), ar())).toBe(false);
-    // Non-allowlisted author blocked.
     expect(commandAllowed(prLike({ author: "mallory" }), ar({ authors: ["alice"] }))).toBe(false);
   });
 });

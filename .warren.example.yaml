@@ -51,8 +51,10 @@ auto_review:
   release_branch_patterns: []  # e.g ['^auto-update/']
   release_authors: []          # e.g. [my-release-bot]
 
-  # Label gating. A PR carrying ANY of `skip_labels` is skipped. When `only_labels`
-  # is non-empty, a PR is auto-reviewed ONLY if it carries at least one of them.
+  # Label gating for AUTO review. A PR carrying ANY of `skip_labels` is skipped;
+  # when `only_labels` is non-empty, a PR is auto-reviewed ONLY if it carries at
+  # least one of them. These are SCOPE filters — an explicit `@warren review`
+  # still runs regardless (only the author allow/deny lists gate commands).
   skip_labels: [warren:skip]
   only_labels: []
   # Ignore-pattern gates for AUTO review only (explicit @warren commands still run).
