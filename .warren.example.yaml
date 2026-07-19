@@ -15,6 +15,33 @@ profile: chill
 # raising this floor.
 min_severity: low
 
+# GitHub authentication + identity. SECRET-FREE: this file holds only the auth
+# MODE, non-secret identifiers (App id / installation id / bot login), and the
+# NAMES of env vars / file paths that hold the secrets. The PAT, the App private
+# key, and the webhook secret are supplied via the environment / a mounted file.
+github:
+  # `pat` (default) — authenticate with a Personal Access Token (GITHUB_TOKEN),
+  #   posting as the token's human owner.
+  # `app`  — authenticate as a GitHub App: Warren signs a short-lived JWT with the
+  #   App private key, exchanges it for a per-installation token (scoped, ~1h TTL,
+  #   auto-refreshed), and posts as `<app-slug>[bot]`. See the README "GitHub App"
+  #   section for the one-time registration + install steps.
+  auth: pat
+  # app mode — the GitHub App's numeric App ID and the installation id to mint
+  # tokens for (NOT secrets). Also settable via GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID.
+  # app_id: "123456"
+  # installation_id: "7654321"
+  # The bot's login, used to recognize Warren's own comments (sticky walkthrough /
+  # resolve-on-fix / command scanner). In app mode it is auto-resolved from GET /app
+  # when omitted; set it explicitly to skip that lookup. e.g. warren[bot]
+  # bot_login: warren[bot]
+  # Where the App PRIVATE KEY (a secret) comes from — a mounted file path wins over
+  # the env var. NEVER inline the key here.
+  # private_key_path: /run/secrets/warren-app.private-key.pem
+  private_key_env: GITHUB_APP_PRIVATE_KEY
+  # Env var holding the webhook HMAC secret (a secret; verifies X-Hub-Signature-256).
+  webhook_secret_env: WARREN_WEBHOOK_SECRET
+
 # How Warren discovers work to review.
 trigger:
   # poll (default) is OUTBOUND-ONLY — it needs no public ingress and works behind
@@ -60,6 +87,11 @@ auto_review:
   # Ignore-pattern gates for AUTO review only (explicit @warren commands still run).
   skip_title_patterns: []   # e.g. ['^wip:', '\\[skip review\\]']
   skip_branch_patterns: []  # e.g. ['^wip/']
+  # AUTHORIZATION: which commenters may trigger an @warren command, by their GitHub
+  # repo permission (author_association). Empty (default) = any commenter. Set to
+  # require write access so a drive-by can't trigger review spend. Composes with the
+  # author allow/deny lists above. e.g. [OWNER, MEMBER, COLLABORATOR]
+  command_associations: []
 
 # Per-repo review policy levers (cost vs. aggression). Override per repo below.
 review:

@@ -57,6 +57,22 @@ const WarrenConfigRawZ = z.object({
   // Only `nit` is dropped by default; `nit` surfaces under profile=assertive.
   // Precision is preserved by the adversarial verify pass, not by suppressing severity.
   min_severity: SeverityZ.default("low"),
+  // GitHub auth + identity. SECRET-FREE (see WarrenConfig.github): only the mode,
+  // non-secret ids, and env-var/file NAMES for the secrets live here.
+  github: z
+    .object({
+      auth: z.enum(["pat", "app"]).default("pat"),
+      app_id: z.string().optional(),
+      installation_id: z
+        .union([z.string(), z.number().int().positive()])
+        .transform((v) => String(v))
+        .optional(),
+      bot_login: z.string().optional(),
+      private_key_env: z.string().default("GITHUB_APP_PRIVATE_KEY"),
+      private_key_path: z.string().optional(),
+      webhook_secret_env: z.string().default("WARREN_WEBHOOK_SECRET"),
+    })
+    .default({}),
   trigger: z
     .object({
       mode: z.enum(["poll", "webhook", "tunnel"]).default("poll"),
@@ -90,6 +106,10 @@ const WarrenConfigRawZ = z.object({
       // Ignore-pattern gates for AUTO review (explicit @warren commands still run).
       skip_title_patterns: z.array(z.string()).default([]),
       skip_branch_patterns: z.array(z.string()).default([]),
+      // Command authorization by commenter repo permission (author_association).
+      // Empty (default) = any commenter; e.g. [OWNER, MEMBER, COLLABORATOR] to
+      // require write access before an @warren command is honored.
+      command_associations: z.array(z.string()).default([]),
     })
     .default({}),
   // Per-repo review policy levers (cost/aggression).
@@ -205,6 +225,19 @@ export function toWarrenConfig(raw: WarrenConfigRaw): WarrenConfig {
   return {
     profile: raw.profile,
     minSeverity: raw.min_severity,
+    github: {
+      auth: raw.github.auth,
+      ...(raw.github.app_id !== undefined ? { appId: raw.github.app_id } : {}),
+      ...(raw.github.installation_id !== undefined
+        ? { installationId: raw.github.installation_id }
+        : {}),
+      ...(raw.github.bot_login !== undefined ? { botLogin: raw.github.bot_login } : {}),
+      privateKeyEnv: raw.github.private_key_env,
+      ...(raw.github.private_key_path !== undefined
+        ? { privateKeyPath: raw.github.private_key_path }
+        : {}),
+      webhookSecretEnv: raw.github.webhook_secret_env,
+    },
     trigger: {
       mode: raw.trigger.mode,
       pollIntervalMs: raw.trigger.poll_interval,
@@ -225,6 +258,7 @@ export function toWarrenConfig(raw: WarrenConfigRaw): WarrenConfig {
       onlyLabels: raw.auto_review.only_labels,
       skipTitlePatterns: raw.auto_review.skip_title_patterns,
       skipBranchPatterns: raw.auto_review.skip_branch_patterns,
+      commandAssociations: raw.auto_review.command_associations,
     },
     review: {
       effort: raw.review.effort,

@@ -177,6 +177,11 @@ commented starter. Keys are snake_case on disk.
 |-----|---------|--------------|
 | `profile` | `chill` | Review persona; `assertive` also surfaces `nit`-level findings. |
 | `min_severity` | `low` | Lowest severity that can be posted (`critical`…`nit`). |
+| `github.auth` | `pat` | Credential mode: `pat` (Personal Access Token) or `app` (GitHub App identity — see [GitHub App identity](#github-app-identity)). |
+| `github.app_id` / `github.installation_id` | — | App mode: the App ID + installation id (not secrets; env overridable). |
+| `github.bot_login` | — | Warren's bot login for self-comment detection; auto-resolved from `GET /app` in app mode when omitted. |
+| `github.private_key_env` / `github.private_key_path` | `GITHUB_APP_PRIVATE_KEY` / — | Where the App private key (secret) is read from — a mounted file path wins over the env var. Never inline the key in config. |
+| `github.webhook_secret_env` | `WARREN_WEBHOOK_SECRET` | Env var holding the webhook HMAC secret (verifies `X-Hub-Signature-256`). |
 | `trigger.mode` | `poll` | `poll` (outbound-only, shipped). `webhook`/`tunnel` are roadmap. |
 | `trigger.poll_interval` | `60s` | Poll cadence — `"30s"`, `"5m"`, `"1h"`, or ms. |
 | `auto_review.enabled` | `true` | Auto-review open PRs (vs. `@warren`-only). |
@@ -189,6 +194,7 @@ commented starter. Keys are snake_case on disk.
 | `auto_review.skip_labels` | `[warren:skip]` | Skip **auto-review** of any PR carrying one of these labels (explicit `@warren` commands still run). |
 | `auto_review.only_labels` | `[]` | When set, **auto-review** a PR only if it carries one of these labels (explicit `@warren` commands still run). |
 | `auto_review.skip_title_patterns` / `.skip_branch_patterns` | `[]` | Ignore patterns (regex) for AUTO review; explicit `@warren` commands still run. |
+| `auto_review.command_associations` | `[]` | **Command authorization** by commenter repo permission (`author_association`). Empty = any commenter; set e.g. `[OWNER, MEMBER, COLLABORATOR]` to require write access before an `@warren` command is honored. Composes with the author allow/deny lists. |
 | `review.effort` | `normal` | `low` (no triage/verify, tight budget), `normal` (verify on), `high` (triage + verify, generous budget). Reasoning-effort proxy. |
 | `review.max_files` | `0` | Soft ceiling: skip a PR whose changed-file count exceeds this (`0` = no cap). |
 | `review.max_tokens` | `0` | Soft ceiling: skip a PR whose diff (est. ~4 chars/token) exceeds this (`0` = no cap). |
@@ -214,7 +220,12 @@ Secrets and deploy-specific settings live in the env (see
 
 | Var | Default | What it does |
 |-----|---------|--------------|
-| `GITHUB_TOKEN` | — | Read PRs + post reviews. **Secret.** Required for GitHub reviews. |
+| `GITHUB_TOKEN` | — | Read PRs + post reviews in `pat` mode. **Secret.** Required for GitHub reviews unless using App auth. |
+| `GITHUB_AUTH_MODE` | — | Override `github.auth` (`pat`\|`app`). |
+| `GITHUB_APP_ID` / `GITHUB_APP_INSTALLATION_ID` | — | App mode identifiers (not secrets; override `.warren.yaml`). |
+| `GITHUB_APP_PRIVATE_KEY` | — | App private key PEM (PKCS#1 or PKCS#8). **Secret.** Alternative to `github.private_key_path`. |
+| `GITHUB_BOT_LOGIN` | — | Force Warren's bot login (else auto-resolved in app mode). |
+| `WARREN_WEBHOOK_SECRET` | — | Webhook HMAC secret; enables `POST /webhook` + `X-Hub-Signature-256` verification. **Secret.** |
 | `ANTHROPIC_API_KEY` | — | Only used when `WARREN_RUNTIME=sdk`. **Secret.** |
 | `WARREN_RUNTIME` | `cli` | `cli` (Claude Max plan) or `sdk` (metered API key). |
 | `WARREN_LIVE` | off | Truthy (`1`/`true`) = post for real; otherwise dry-run. |
@@ -226,6 +237,68 @@ Secrets and deploy-specific settings live in the env (see
 | `WARREN_JWT_SECRET` | — | HS256 secret for `jwt` mode. **Secret.** Required in `jwt` mode. |
 | `WARREN_JWT_ISSUER` / `WARREN_JWT_AUDIENCE` | — | Optional `iss`/`aud` claims to validate. |
 
+## GitHub App identity
+
+By default Warren authenticates with a **Personal Access Token** (`GITHUB_TOKEN`)
+and posts as the token's human owner. For a proper bot identity, switch to a
+**GitHub App**: Warren then posts as `<app-slug>[bot]`, using **short-lived,
+per-installation tokens** (scoped, ~1h TTL, auto-refreshed) instead of a broad
+long-lived PAT — smaller blast radius, its own reliably-detectable comment author,
+and a basis for webhook-signature + command authorization.
+
+This is **opt-in and additive** — the PAT path is unchanged and remains the default.
+
+### One-time setup (owner)
+
+1. **Register the App** — GitHub → *Settings → Developer settings → GitHub Apps →
+   New GitHub App*. Give it a name (its slug becomes the bot login, e.g.
+   `warren` → `warren[bot]`). Homepage URL can be anything.
+   - **Repository permissions:** *Pull requests: Read & write*, *Contents: Read-only*,
+     *Issues: Read & write*, *Checks: Read & write* (for future check-run posting).
+   - **Subscribe to events:** *Pull request*, *Issue comment*, *Pull request review
+     comment* (needed once webhook delivery lands; harmless now).
+   - **Where can this App be installed?** Only on this account is fine.
+2. **Generate a private key** — on the App's page, *Generate a private key*. GitHub
+   downloads a `.pem` (PKCS#1). Keep it secret.
+3. **Install the App** — *Install App* → choose the repos Warren should watch. After
+   installing, the URL is `…/installations/<INSTALLATION_ID>` — note that number.
+4. **Note the App ID** — shown on the App's *General* page.
+5. **Provide the credentials to Warren:**
+   - In `.warren.yaml`:
+     ```yaml
+     github:
+       auth: app
+       app_id: "<APP_ID>"
+       installation_id: "<INSTALLATION_ID>"
+       # optional; auto-resolved from GET /app when omitted:
+       # bot_login: warren[bot]
+       # a mounted file wins over the env var:
+       private_key_path: /run/secrets/warren-app.private-key.pem
+     ```
+   - **Mount the private key** at that path (or set `GITHUB_APP_PRIVATE_KEY` to the
+     PEM text). It is a **secret** — never commit it or put it in `.warren.yaml`.
+     Both PKCS#1 (GitHub's default) and PKCS#8 keys are accepted.
+6. **(Optional) Webhook secret** — set `WARREN_WEBHOOK_SECRET` to enable the
+   signature-verified `POST /webhook` endpoint (see below).
+
+Verify with `GET /status` → `githubAuthMode: "app"` and, once resolved, `botLogin`.
+
+### Command authorization
+
+Set `auto_review.command_associations` (e.g. `[OWNER, MEMBER, COLLABORATOR]`) to
+require a commenter to have repo write access before an `@warren` command is
+honored — so a drive-by contributor can't trigger review spend. This composes with
+the author allow/deny lists. Empty (default) keeps the legacy "any commenter" behavior.
+
+### Webhook signature verification
+
+When `WARREN_WEBHOOK_SECRET` is set, Warren exposes `POST /webhook` and verifies the
+`X-Hub-Signature-256` HMAC (timing-safe) over the raw body — unsigned or invalid
+deliveries are rejected with `401`. Poll mode still drives reviews today; full
+webhook → review delivery is a follow-up (the endpoint acknowledges valid deliveries
+with `202`). The endpoint is intentionally **not** behind the dashboard `jwt` gate —
+the signature is its authentication.
+
 ## The dashboard
 
 `serve` (the default command) also runs a small web dashboard + JSON API on
@@ -234,7 +307,8 @@ activity, severity breakdowns, and live status.
 
 API surface: `GET /` (dashboard SPA), `GET /api/overview`, `GET /api/repos`,
 `GET /api/reviews`, `GET /api/reviews/:id`, `GET /api/auth-mode`, `GET /status`,
-`GET /healthz`, and `POST /review` (manually enqueue a review).
+`GET /healthz`, `POST /review` (manually enqueue a review), and — when a webhook
+secret is configured — `POST /webhook` (signature-verified GitHub ingress).
 
 **Auth** is the installer's choice (`WARREN_AUTH_MODE`):
 
@@ -270,6 +344,10 @@ model + roadmap lives in **[`SECURITY.md`](./SECURITY.md)**; the highlights:
 - **No public ingress in poll mode.** Nothing inbound to attack.
 - **Secrets are never logged.** Diagnostics report only *presence* booleans
   (`hasGithubToken: true`), never values.
+- **Least-privilege credentials (App mode).** With `github.auth: app`, Warren uses
+  short-lived, per-installation tokens scoped to the granted permissions — no broad,
+  long-lived PAT to leak. Webhook deliveries are HMAC-verified; `@warren` commands can
+  be gated on the commenter's repo permission.
 - **Roadmap (design-only): sandbox + egress lockdown.** An ephemeral non-root,
   read-only-rootfs container (`sandbox.mode: docker`) with resource limits and a
   GitHub+Anthropic-only egress allowlist — schema-wired today, runtime not yet.

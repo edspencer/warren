@@ -118,5 +118,8 @@ export function parseWarrenCommand(
     author: comment.author,
     ...(parsed.question ? { question: parsed.question } : {}),
     ...(comment.kind ? { commentKind: comment.kind } : {}),
+    ...(comment.authorAssociation
+      ? { authorAssociation: comment.authorAssociation }
+      : {}),
   };
 }

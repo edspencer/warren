@@ -28,7 +28,7 @@ import type {
 import { repoLabel, targetKey } from "../types.js";
 import type { PrInfo } from "../github/client.js";
 import { parseWarrenCommand } from "./commands.js";
-import { autoReviewDecision, commandAllowed } from "./policy.js";
+import { autoReviewDecision, commandAllowed, commandAssociationAllowed } from "./policy.js";
 import type { TriggerSource, TriggerSourceDeps } from "./source.js";
 
 type EmitFn = (e: ReviewEvent) => void;
@@ -189,6 +189,17 @@ export class PollTriggerSource implements TriggerSource {
       if (!commandAllowed(pr, cfg.autoReview)) {
         this.logger.debug(
           `poll: PR author '${pr.author}' blocked by author policy; ignoring @warren '${cmd.kind}' on ${key}`,
+        );
+        continue;
+      }
+      // AUTHORIZATION (#32): gate the command on the COMMENTER's repo permission
+      // (author_association). Default (empty list) = any commenter; when configured
+      // (e.g. [OWNER,MEMBER,COLLABORATOR]) a non-writer's command is ignored so it
+      // can't trigger review spend. Composes with the PR-author gate above.
+      if (!commandAssociationAllowed(cmd.authorAssociation, cfg.autoReview.commandAssociations)) {
+        this.logger.debug(
+          `poll: commenter '${cmd.author}' (association=${cmd.authorAssociation ?? "NONE"}) ` +
+            `lacks required permission; ignoring @warren '${cmd.kind}' on ${key}`,
         );
         continue;
       }

@@ -147,6 +147,12 @@ export interface WarrenCommand {
   question?: string;
   /** Source-comment channel: "review" = diff-thread reply, "issue" = PR conversation. */
   commentKind?: "issue" | "review";
+  /**
+   * GitHub `author_association` of the COMMENTER (OWNER/MEMBER/COLLABORATOR/
+   * CONTRIBUTOR/NONE/…), used to authorize who may trigger @warren commands
+   * (see trigger/policy.ts commandAssociationAllowed). Uppercased; may be undefined.
+   */
+  authorAssociation?: string;
 }
 
 // ─────────────────────────── Config types ───────────────────────────────
@@ -187,6 +193,30 @@ export interface SandboxConfig {
 export interface WarrenConfig {
   profile: "chill" | "assertive";
   minSeverity: Severity; // findings below this are dropped
+  // GitHub authentication + identity. SECRET-FREE: only the auth MODE and
+  // non-secret identifiers (App id, installation id, bot login) plus the NAMES of
+  // env vars / file paths holding secrets live here. The PAT, the App private key,
+  // and the webhook secret are supplied via the environment / a mounted file.
+  github: {
+    // `pat` (default) = static Personal Access Token from GITHUB_TOKEN, posting as
+    // a human. `app` = GitHub App identity: a signed RS256 JWT is exchanged for a
+    // short-lived per-installation token; comments post as `<app-slug>[bot]`.
+    auth: "pat" | "app";
+    // app mode: the GitHub App's numeric App ID and the installation id to mint
+    // tokens for. Not secrets. (Also overridable via GITHUB_APP_ID / _INSTALLATION_ID.)
+    appId?: string;
+    installationId?: string;
+    // The bot's GitHub login (e.g. `warren[bot]`), used to recognize Warren's own
+    // comments (sticky walkthrough upsert / resolve-on-fix / command scanner). When
+    // unset in app mode it is resolved from `GET /app` at boot (best-effort).
+    botLogin?: string;
+    // Name of the env var holding the App private key PEM (default GITHUB_APP_PRIVATE_KEY).
+    privateKeyEnv: string;
+    // Path to a mounted file holding the App private key PEM (takes precedence over env).
+    privateKeyPath?: string;
+    // Name of the env var holding the webhook HMAC secret (default WARREN_WEBHOOK_SECRET).
+    webhookSecretEnv: string;
+  };
   trigger: {
     mode: "poll" | "webhook" | "tunnel";
     pollIntervalMs: number; // poll mode only
@@ -222,6 +252,12 @@ export interface WarrenConfig {
     // skipped for AUTO review (explicit @warren commands still work). Empty default.
     skipTitlePatterns: string[];
     skipBranchPatterns: string[];
+    // Command authorization by COMMENTER repo permission (GitHub author_association).
+    // When NON-EMPTY, an @warren command is honored only if the commenter's
+    // association is in this list (e.g. [OWNER, MEMBER, COLLABORATOR] → write access).
+    // Empty (default) = no association gating (any commenter, legacy behavior).
+    // Composes with the PR-author allow/deny gate. Case-insensitive.
+    commandAssociations: string[];
   };
   // Per-repo review policy levers (cost/aggression). See review/policy.ts.
   review: {

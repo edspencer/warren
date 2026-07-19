@@ -3,8 +3,16 @@
 // any diagnostic dump.
 
 export interface WarrenEnv {
-  /** GitHub token for reads (and live writes). Secret — never log. */
+  /** GitHub token for reads (and live writes) in `pat` mode. Secret — never log. */
   githubToken?: string;
+  /** GitHub auth mode override (GITHUB_AUTH_MODE=pat|app). Wins over config.github.auth. */
+  githubAuthMode?: "pat" | "app";
+  /** GitHub App id override (GITHUB_APP_ID). Wins over config.github.app_id. */
+  githubAppId?: string;
+  /** GitHub App installation id override (GITHUB_APP_INSTALLATION_ID). Wins over config. */
+  githubAppInstallationId?: string;
+  /** Bot login override (GITHUB_BOT_LOGIN). Wins over config.github.bot_login. */
+  githubBotLogin?: string;
   /** Anthropic API key (only used when runtime === "sdk"). Secret — never log. */
   anthropicApiKey?: string;
   /** Agent runtime: "cli" (Claude Code / Max plan) or "sdk". */
@@ -64,8 +72,13 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): WarrenEnv {
   const portRaw = source.WARREN_PORT ?? source.PORT;
   const port = portRaw ? Number.parseInt(portRaw, 10) : 5000;
   const authMode = (source.WARREN_AUTH_MODE ?? "none").trim().toLowerCase();
+  const ghAuthMode = source.GITHUB_AUTH_MODE?.trim().toLowerCase();
   return {
     githubToken: source.GITHUB_TOKEN || undefined,
+    githubAuthMode: ghAuthMode === "app" ? "app" : ghAuthMode === "pat" ? "pat" : undefined,
+    githubAppId: source.GITHUB_APP_ID || undefined,
+    githubAppInstallationId: source.GITHUB_APP_INSTALLATION_ID || undefined,
+    githubBotLogin: source.GITHUB_BOT_LOGIN || undefined,
     anthropicApiKey: source.ANTHROPIC_API_KEY || undefined,
     runtime: runtime === "sdk" ? "sdk" : "cli",
     live: truthy(source.WARREN_LIVE),
@@ -90,6 +103,10 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): WarrenEnv {
 export function redactedEnv(env: WarrenEnv): Record<string, unknown> {
   return {
     hasGithubToken: !!env.githubToken,
+    githubAuthMode: env.githubAuthMode,
+    githubAppId: env.githubAppId,
+    githubAppInstallationId: env.githubAppInstallationId,
+    githubBotLogin: env.githubBotLogin,
     hasAnthropicApiKey: !!env.anthropicApiKey,
     runtime: env.runtime,
     live: env.live,
