@@ -207,4 +207,40 @@ describe("env", () => {
     const cfg = await loadWarrenConfig(join(dir, "absent.yaml"), env);
     expect(cfg.live).toBe(true);
   });
+
+  it("github block defaults (secret-free): pat mode + env-var NAMES only", () => {
+    const cfg = defaultWarrenConfig();
+    expect(cfg.github.auth).toBe("pat");
+    expect(cfg.github.privateKeyEnv).toBe("GITHUB_APP_PRIVATE_KEY");
+    expect(cfg.github.webhookSecretEnv).toBe("WARREN_WEBHOOK_SECRET");
+    expect(cfg.github.appId).toBeUndefined();
+    // No secret value fields exist on the schema at all.
+    expect(Object.keys(cfg.github)).not.toContain("privateKey");
+  });
+
+  it("parses an app-mode github block (installation_id number → string)", () => {
+    const cfg = WarrenConfigZ.parse({
+      github: {
+        auth: "app",
+        app_id: "12345",
+        installation_id: 6789,
+        bot_login: "warren[bot]",
+        private_key_path: "/run/secrets/warren-app.pem",
+      },
+    });
+    expect(cfg.github.auth).toBe("app");
+    expect(cfg.github.appId).toBe("12345");
+    expect(cfg.github.installationId).toBe("6789"); // coerced to string
+    expect(cfg.github.botLogin).toBe("warren[bot]");
+    expect(cfg.github.privateKeyPath).toBe("/run/secrets/warren-app.pem");
+  });
+
+  it("parses auto_review.command_associations (commenter-permission gate)", () => {
+    const cfg = WarrenConfigZ.parse({
+      auto_review: { command_associations: ["OWNER", "MEMBER", "COLLABORATOR"] },
+    });
+    expect(cfg.autoReview.commandAssociations).toEqual(["OWNER", "MEMBER", "COLLABORATOR"]);
+    // default is empty (no gating)
+    expect(defaultWarrenConfig().autoReview.commandAssociations).toEqual([]);
+  });
 });

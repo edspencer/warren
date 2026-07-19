@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { WarrenApp } from "../src/container.js";
 import type { WarrenAuthConfig } from "../src/config/env.js";
 import { defaultWarrenConfig, reloadWarrenConfigInto } from "../src/config/load.js";
+import { verifyWebhookSignature } from "../src/trigger/webhook-verify.js";
 import { createReviewHistoryStore, type ReviewHistoryStore } from "../src/state/history.js";
 import type { Finding, Logger, ReviewResult, ReviewTarget } from "../src/types.js";
 
@@ -76,6 +77,10 @@ export interface FakeAppOptions {
   config?: Partial<WarrenApp["config"]>;
   /** Path the config-editing API (#27) reads/writes. Defaults under dataDir. */
   configPath?: string;
+  /** Resolved GitHub auth mode surfaced on /status (defaults to "pat"). */
+  githubAuthMode?: "pat" | "app";
+  /** When set, enables the /webhook route with this HMAC secret (#32). */
+  webhookSecret?: string;
 }
 
 /** Build a fake WarrenApp with a real history store; other deps are stubs. */
@@ -118,6 +123,10 @@ export function makeFakeApp(opts: FakeAppOptions): {
     },
     queue: { activeCount: () => 0 },
     clientFor: () => null,
+    githubAuthMode: opts.githubAuthMode ?? "pat",
+    webhookConfigured: Boolean(opts.webhookSecret),
+    verifyWebhook: (rawBody: string | Buffer, sig: string | undefined) =>
+      verifyWebhookSignature(opts.webhookSecret, rawBody, sig),
   } as unknown as WarrenApp;
   return { app, history };
 }

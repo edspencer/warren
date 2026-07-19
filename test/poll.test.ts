@@ -477,6 +477,31 @@ describe("PollTriggerSource (github)", () => {
     expect(events[0]!.reason).toBe("command");
     expect(events[0]!.command?.kind).toBe("review");
   });
+
+  it("command_associations: honors a COLLABORATOR command but blocks a NONE commenter (#32)", async () => {
+    const state = createReviewStateStore(dataDir);
+    await state.setPrState(KEY, (s) => ({ ...s, lastReviewedSha: "sha1" }));
+    const events: ReviewEvent[] = [];
+    const src = new PollTriggerSource(
+      deps({
+        state,
+        client: fakeClient([pr({ headSha: "sha1" })], {
+          1: [
+            comment({ id: 8, author: "drive-by", body: "@warren review", authorAssociation: "NONE" }),
+            comment({ id: 9, author: "maint", body: "@warren review", authorAssociation: "COLLABORATOR" }),
+          ],
+        }),
+        config: config({
+          autoReview: ar({ commandAssociations: ["OWNER", "MEMBER", "COLLABORATOR"] }),
+        }),
+      }),
+    );
+    await src.tick((e) => events.push(e));
+    // Only the COLLABORATOR's command is honored; the NONE commenter is ignored.
+    expect(events).toHaveLength(1);
+    expect(events[0]!.reason).toBe("command");
+    expect(events[0]!.requestedBy).toBe("maint");
+  });
 });
 
 describe("PollTriggerSource (local-git)", () => {

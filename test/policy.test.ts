@@ -3,11 +3,13 @@ import type { WarrenConfig } from "../src/types.js";
 import {
   autoReviewDecision,
   commandAllowed,
+  commandAssociationAllowed,
   isAuthorAllowed,
   isAuthorDenied,
   isReleasePr,
   labelGateAllows,
   matchesAnyPattern,
+  WRITE_ACCESS_ASSOCIATIONS,
   type PrLike,
 } from "../src/trigger/policy.js";
 import {
@@ -172,6 +174,27 @@ describe("review/policy — budget ceilings", () => {
     // 4001 chars -> ~1001 tokens > 1000
     expect(budgetSkipReason({ fileCount: 1, diffChars: 4001 }, { effort: "normal", maxFiles: 0, maxTokens: 1000 })).toMatch(/max_tokens/);
     expect(budgetSkipReason({ fileCount: 1, diffChars: 4000 }, { effort: "normal", maxFiles: 0, maxTokens: 1000 })).toBeNull();
+  });
+});
+
+describe("commandAssociationAllowed (#32 — commenter permission gate)", () => {
+  it("empty/undefined gate = any commenter (legacy behavior)", () => {
+    expect(commandAssociationAllowed("NONE", [])).toBe(true);
+    expect(commandAssociationAllowed(undefined, [])).toBe(true);
+    expect(commandAssociationAllowed("CONTRIBUTOR", undefined)).toBe(true);
+  });
+
+  it("with a gate set, only listed associations pass (case-insensitive)", () => {
+    const allowed = WRITE_ACCESS_ASSOCIATIONS; // OWNER/MEMBER/COLLABORATOR
+    expect(commandAssociationAllowed("OWNER", allowed)).toBe(true);
+    expect(commandAssociationAllowed("member", allowed)).toBe(true);
+    expect(commandAssociationAllowed("COLLABORATOR", allowed)).toBe(true);
+    expect(commandAssociationAllowed("CONTRIBUTOR", allowed)).toBe(false);
+    expect(commandAssociationAllowed("NONE", allowed)).toBe(false);
+  });
+
+  it("an undefined association is treated as NONE against a non-empty gate", () => {
+    expect(commandAssociationAllowed(undefined, WRITE_ACCESS_ASSOCIATIONS)).toBe(false);
   });
 });
 
