@@ -86,6 +86,12 @@ export interface ReviewTargetProviderDeps {
   /** Test seam: override the clone remote URL (e.g. a local bare repo). Must be
    *  credential-free — the token flows through the credential helper, not the URL. */
   remoteUrlFor?: (t: import("../types.js").GithubPrTarget) => string;
+  /**
+   * Async resolver for the clone-remote token (App installation tokens rotate, so a
+   * static string is insufficient in app mode). Preferred over `githubToken` when set;
+   * resolved per checkout, then handed to git via the credential helper. NEVER logged.
+   */
+  getGithubToken?: () => Promise<string>;
   /** Per-target path filters (gitignore-style, `!` = exclude). Overrides `pathFilters`. */
   pathFiltersFor?: (t: ReviewTarget) => string[];
   /** Fallback path filters when `pathFiltersFor` is absent. */

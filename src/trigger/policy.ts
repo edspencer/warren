@@ -104,6 +104,28 @@ export function isAuthorDenied(login: string | undefined, denyAuthors: string[])
   return loginIn(login, denyAuthors);
 }
 
+/** GitHub associations that imply write access to the repo (recommended default set). */
+export const WRITE_ACCESS_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR"];
+
+/**
+ * Command-authorization gate on the COMMENTER's repo permission (issue #32). GitHub
+ * stamps every comment with an `author_association` (OWNER/MEMBER/COLLABORATOR/
+ * CONTRIBUTOR/NONE/…). When `allowed` is NON-EMPTY, an @warren command is honored
+ * only if the commenter's association is in that set — so a drive-by CONTRIBUTOR or
+ * random user can't trigger a review/spend. When `allowed` is EMPTY (default), no
+ * association gating is applied (any commenter — legacy behavior). Case-insensitive.
+ * An undefined association is treated as NONE and only passes an empty gate.
+ */
+export function commandAssociationAllowed(
+  association: string | undefined,
+  allowed: string[] | undefined,
+): boolean {
+  if (!allowed || allowed.length === 0) return true;
+  if (!association) return false;
+  const want = association.toUpperCase();
+  return allowed.some((a) => a.toUpperCase() === want);
+}
+
 // ─────────────────────────── Label gate ───────────────────────────
 
 /**

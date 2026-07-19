@@ -88,6 +88,9 @@ export function registerRoutes(server: FastifyInstance, app: WarrenApp): void {
     queue: { active: app.queue.activeCount() },
     watchedRepos: app.repos.map(repoLabel),
     githubTokenConfigured: Boolean(app.env.githubToken),
+    githubAuthMode: app.githubAuthMode,
+    ...(app.botLogin ? { botLogin: app.botLogin } : {}),
+    webhookConfigured: app.webhookConfigured,
   }));
 
   // ─────────────────────────── Dashboard API ───────────────────────────

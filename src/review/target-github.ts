@@ -103,11 +103,17 @@ export class GithubPrTargetProvider implements ReviewTargetProvider {
     const dir = join(this.deps.dataDir, "checkouts", sanitizeKey(targetKey(t)));
     const remoteUrl =
       this.deps.remoteUrlFor?.(t) ?? defaultGithubRemote(t.repo.owner, t.repo.name);
+    // Prefer the async resolver (App installation tokens rotate) over the static
+    // token. The token is supplied to runGit's credential helper (never embedded
+    // in the credential-free remote URL) by the hardened `prepareCheckout` below.
+    const token = this.deps.getGithubToken
+      ? await this.deps.getGithubToken()
+      : (this.deps.githubToken ?? "");
     return prepareCheckout({
       dir,
       remoteUrl,
       headSha: t.headSha,
-      token: this.deps.githubToken ?? "",
+      token,
     });
   }
 }

@@ -13,6 +13,7 @@
  */
 
 import type { DiffSide, Logger, RepoRef } from "../types.js";
+import { StaticTokenProvider, type TokenProvider } from "./auth.js";
 import { mapFindingToHunk, parseDiff } from "./diff.js";
 import { DryRunSink, syntheticId, syntheticNodeId } from "./dryrun.js";
 import {
@@ -62,6 +63,8 @@ export interface IssueComment {
   createdAt: string;
   /** Channel this comment came from: "issue" = PR conversation, "review" = diff thread. */
   kind?: "issue" | "review";
+  /** GitHub author_association of the commenter (OWNER/MEMBER/COLLABORATOR/…). Uppercased. */
+  authorAssociation?: string;
 }
 
 export interface ReviewSubmission {
@@ -272,7 +275,10 @@ interface RequestOpts {
 }
 
 export interface RestGitHubClientOptions {
-  token: string;
+  /** Static PAT. Provide EITHER this OR `tokenProvider` (provider wins if both). */
+  token?: string;
+  /** Dynamic credential source (PAT or App installation token; auto-refreshing). */
+  tokenProvider?: TokenProvider;
   apiBaseUrl?: string;
   logger?: Logger;
   fetchImpl?: typeof fetch;
@@ -283,21 +289,32 @@ export interface RestGitHubClientOptions {
 
 export class RestGitHubClient implements GitHubClient {
   readonly apiBaseUrl: string;
-  private readonly token: string;
+  private readonly tokenProvider: TokenProvider;
   private readonly logger: Logger;
   private readonly fetchImpl: typeof fetch;
   private readonly retry: RetryConfig;
 
   constructor(opts: RestGitHubClientOptions) {
-    this.token = opts.token;
+    // A provider (PAT or App installation token) is the general seam; a bare
+    // `token` string is wrapped in a StaticTokenProvider for backward compat.
+    this.tokenProvider = opts.tokenProvider ?? new StaticTokenProvider(opts.token ?? "");
     this.apiBaseUrl = opts.apiBaseUrl ?? DEFAULT_API_BASE_URL;
     this.logger = opts.logger ?? noopLogger;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.retry = { ...DEFAULT_RETRY, ...opts.retry };
   }
 
-  private graphqlOpts() {
-    return { token: this.token, apiBaseUrl: this.apiBaseUrl, fetchImpl: this.fetchImpl };
+  /** Resolve a currently-valid bearer token (static PAT, or a fresh App token). */
+  private async resolveToken(): Promise<string> {
+    return this.tokenProvider.getToken();
+  }
+
+  private async graphqlOpts() {
+    return {
+      token: await this.resolveToken(),
+      apiBaseUrl: this.apiBaseUrl,
+      fetchImpl: this.fetchImpl,
+    };
   }
 
   /** Core fetch with backoff + rate-limit handling. Never logs the token. */
@@ -310,7 +327,7 @@ export class RestGitHubClient implements GitHubClient {
     const headers: Record<string, string> = {
       Accept: opts.accept ?? "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
-      Authorization: `Bearer ${this.token}`,
+      Authorization: `Bearer ${await this.resolveToken()}`,
     };
     if (opts.body !== undefined) headers["Content-Type"] = "application/json";
 
@@ -596,13 +613,11 @@ export class RestGitHubClient implements GitHubClient {
   }
 
   async resolveThread(repo: RepoRef, threadId: string): Promise<WriteOutcome> {
-    const thread = await (async () => {
-      const data = await graphqlRequest<{
-        resolveReviewThread: { thread: { id: string } };
-      }>(this.graphqlOpts(), RESOLVE_REVIEW_THREAD_MUTATION, { threadId });
-      return data.resolveReviewThread.thread;
-    })();
-    return { dryRun: false, ref: thread.id };
+    const opts = await this.graphqlOpts();
+    const data = await graphqlRequest<{
+      resolveReviewThread: { thread: { id: string } };
+    }>(opts, RESOLVE_REVIEW_THREAD_MUTATION, { threadId });
+    return { dryRun: false, ref: data.resolveReviewThread.thread.id };
   }
 
   async addReaction(
@@ -627,7 +642,7 @@ export class RestGitHubClient implements GitHubClient {
 
   /** Look up review-thread node ids (for resolveThread). Live-only helper. */
   async listReviewThreads(repo: RepoRef, prNumber: number) {
-    return fetchReviewThreads(this.graphqlOpts(), repo.owner, repo.name, prNumber);
+    return fetchReviewThreads(await this.graphqlOpts(), repo.owner, repo.name, prNumber);
   }
 }
 
@@ -724,7 +739,10 @@ export class DryRunGitHubClient implements GitHubClient {
 // ─────────────────────────── Factory ───────────────────────────
 
 export interface CreateGitHubClientOptions {
-  token: string;
+  /** Static PAT. Provide EITHER this OR `tokenProvider`. */
+  token?: string;
+  /** Auto-refreshing credential source (App installation token / PAT). Wins over `token`. */
+  tokenProvider?: TokenProvider;
   live: boolean;
   dataDir: string;
   apiBaseUrl?: string;
@@ -742,6 +760,7 @@ export interface CreateGitHubClientOptions {
 export function createGitHubClient(opts: CreateGitHubClientOptions): GitHubClient {
   const rest = new RestGitHubClient({
     token: opts.token,
+    tokenProvider: opts.tokenProvider,
     apiBaseUrl: opts.apiBaseUrl,
     logger: opts.logger,
     fetchImpl: opts.fetchImpl,
@@ -797,6 +816,7 @@ interface RawIssueComment {
   body: string | null;
   user: { login: string } | null;
   created_at: string;
+  author_association?: string;
 }
 
 function toPrInfo(p: RawPull): PrInfo {
@@ -833,6 +853,9 @@ function toIssueComment(c: RawIssueComment, kind?: "issue" | "review"): IssueCom
     author: c.user?.login ?? "",
     createdAt: c.created_at,
     ...(kind ? { kind } : {}),
+    ...(c.author_association
+      ? { authorAssociation: c.author_association.toUpperCase() }
+      : {}),
   };
 }
 

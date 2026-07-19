@@ -23,6 +23,40 @@ export function createServer(app: WarrenApp): FastifyInstance {
     reply.type("text/html").send(DASHBOARD_HTML);
   });
 
+  // Webhook ingress (#32). Registered ONLY when a webhook secret is configured.
+  // Encapsulated in a child context so its raw-body parser is scoped to this route
+  // (the rest of the app keeps normal JSON parsing). The route is intentionally NOT
+  // under /api/* — GitHub can't send a bearer; the HMAC signature IS the auth.
+  // Signature is verified over the RAW body; a bad/missing signature → 401. Full
+  // event → ReviewEvent delivery is a follow-up; a valid delivery is acknowledged.
+  if (app.webhookConfigured) {
+    server.register(async (instance) => {
+      // Raw body is required for HMAC verification. Drop the inherited JSON parser
+      // in THIS encapsulated scope (content-type parsers are per-scope) and capture
+      // every body verbatim as a Buffer — a specific inherited `application/json`
+      // parser would otherwise win over a `*` catch-all and hand us a parsed object.
+      instance.removeAllContentTypeParsers();
+      instance.addContentTypeParser(
+        "*",
+        { parseAs: "buffer" },
+        (_req, body, done) => done(null, body),
+      );
+      instance.post("/webhook", async (request, reply) => {
+        const raw = (request.body ?? Buffer.alloc(0)) as Buffer;
+        const sigHeader = request.headers["x-hub-signature-256"];
+        const sig = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
+        if (!app.verifyWebhook(raw, sig)) {
+          reply.code(401);
+          return { error: "invalid or missing webhook signature" };
+        }
+        // Signature valid. Delivery→review dispatch is a follow-up (poll still drives
+        // reviews today); acknowledge so GitHub marks the delivery successful.
+        reply.code(202);
+        return { ok: true, delivered: false };
+      });
+    });
+  }
+
   registerRoutes(server, app);
 
   // SPA fallback (#12): serve the same shell for every *client* route so a hard

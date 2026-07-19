@@ -4,6 +4,7 @@
 // (§ container). Returns a WarrenApp: the pipeline, queue, trigger source, fleet,
 // resolved config + logger, a one-shot local-review helper, and start()/stop().
 
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { readEnv, type WarrenEnv } from "./config/env.js";
@@ -11,6 +12,11 @@ import { loadWarrenConfig, reloadWarrenConfigInto, resolveRepoConfig } from "./c
 import { createReviewStateStore, type ReviewStateStore } from "./state/store.js";
 import { createReviewHistoryStore, type ReviewHistoryStore } from "./state/history.js";
 import { createGitHubClient, type GitHubClient } from "./github/client.js";
+import {
+  AppTokenProvider,
+  createTokenProvider,
+  type TokenProvider,
+} from "./github/auth.js";
 import {
   createReviewTargetProvider,
   runGit,
@@ -22,6 +28,7 @@ import { handleAsk, type AskHandlerDeps } from "./herd/ask.js";
 import { createReviewPipeline, type ReviewPipeline } from "./review/pipeline.js";
 import { createJobQueue, type JobQueue } from "./trigger/queue.js";
 import { createTriggerSource, type TriggerSource } from "./trigger/source.js";
+import { verifyWebhookSignature } from "./trigger/webhook-verify.js";
 import {
   targetKey,
   type LocalGitTarget,
@@ -56,6 +63,18 @@ export interface WarrenApp {
   reloadConfig(): Promise<void>;
   /** Watched repos (server config + WARREN_REPOS), for introspection. */
   repos: RepoConfig[];
+  /** Resolved GitHub auth mode (`pat` | `app`), for /status introspection. */
+  githubAuthMode: "pat" | "app";
+  /** Warren's own bot login when known (app mode / configured), else undefined. */
+  botLogin?: string;
+  /** True when a webhook HMAC secret is configured (enables the /webhook route). */
+  webhookConfigured: boolean;
+  /**
+   * Verify a GitHub `X-Hub-Signature-256` header against a raw request body using
+   * the configured webhook secret. Returns false (never throws) when no secret is
+   * configured or the signature is missing/invalid. Constant-time.
+   */
+  verifyWebhook(rawBody: string | Buffer, signatureHeader: string | undefined): boolean;
   /** Boot the trigger source; events flow into the job queue. Idempotent-ish. */
   start(): Promise<void>;
   /** Tear everything down: trigger → queue drain → fleet. Idempotent. */
@@ -134,11 +153,20 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
   const state = createReviewStateStore(dataDir);
   const history = createReviewHistoryStore(dataDir);
 
-  // GitHub client factory: one shared client per token (reads identical regardless of
-  // key); WARREN_LIVE selects live vs dry-run. null for local-git targets.
-  const sharedClient: GitHubClient | null = env.githubToken
+  // ── GitHub authentication (PAT vs App installation tokens) ──
+  // Resolve the credential source once. `pat` (default) uses GITHUB_TOKEN verbatim;
+  // `app` signs a JWT with the App private key and mints short-lived per-installation
+  // tokens. Secrets (the PAT, the private key) come from the environment / a mounted
+  // file — never from `.warren.yaml`. Non-fatal when no credential is present (a
+  // local-git-only deploy needs none); the client is simply null.
+  const envSource = opts.env ?? process.env;
+  const auth = await resolveGithubAuth(config, env, envSource, logger);
+
+  // GitHub client factory: one shared client per credential (reads identical regardless
+  // of key); WARREN_LIVE selects live vs dry-run. null for local-git targets.
+  const sharedClient: GitHubClient | null = auth.tokenProvider
     ? createGitHubClient({
-        token: env.githubToken,
+        tokenProvider: auth.tokenProvider,
         live: env.live,
         dataDir,
         logger,
@@ -147,12 +175,17 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
   const clientFor = (target: ReviewTarget): GitHubClient | null =>
     target.kind === "github-pr" ? sharedClient : null;
 
-  // Target provider (github clone / local-git worktree + path filtering).
+  // Target provider (github clone / local-git worktree + path filtering). In app mode
+  // the clone-remote credential must be a FRESH installation token (they rotate), so
+  // pass an async resolver; pat mode keeps the static token path.
   const provider = createReviewTargetProvider({
     dataDir,
     logger,
     clientFor,
     githubToken: env.githubToken,
+    ...(auth.tokenProvider
+      ? { getGithubToken: () => auth.tokenProvider!.getToken() }
+      : {}),
     pathFiltersFor: (t) => configFor(t).pathFilters,
   });
 
@@ -217,6 +250,9 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
     configFor: (repo) => resolveRepoConfig(config, repo),
     resolveLocalGitHead: async (t: LocalGitTarget) =>
       (await runGit(["rev-parse", t.headRef], { cwd: t.repoDir })).trim(),
+    // Warren's own bot login: lets the command scanner ignore Warren's own comments
+    // and (in app mode) recognize its bot identity. May be undefined in pat mode.
+    ...(auth.botLogin ? { botLogin: auth.botLogin } : {}),
     logger,
   });
 
@@ -240,6 +276,12 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
     // stale. Reads always reflect the current watched-repo list.
     get repos(): RepoConfig[] {
       return config.repos;
+    },
+    githubAuthMode: auth.mode,
+    ...(auth.botLogin ? { botLogin: auth.botLogin } : {}),
+    webhookConfigured: Boolean(auth.webhookSecret),
+    verifyWebhook(rawBody, signatureHeader) {
+      return verifyWebhookSignature(auth.webhookSecret, rawBody, signatureHeader);
     },
     configFor,
     clientFor,
@@ -307,4 +349,71 @@ async function resolveHead(repoDir: string, ref: string): Promise<string> {
   } catch {
     return "head";
   }
+}
+
+// ─────────────────────────── GitHub auth resolution ───────────────────────────
+
+export interface ResolvedGithubAuth {
+  mode: "pat" | "app";
+  /** Credential source for the client; null when no credential is configured. */
+  tokenProvider: TokenProvider | null;
+  /** Warren's own bot login (for self-comment / command-scanner filtering), if known. */
+  botLogin?: string;
+  /** Webhook HMAC secret (from the configured env var). Undefined when unset. Secret. */
+  webhookSecret?: string;
+}
+
+/**
+ * Resolve the GitHub credential + identity from config + env. Precedence for the
+ * non-secret knobs is env > config (a deploy-specific override wins). Secrets — the
+ * App private key and the webhook HMAC secret — are read ONLY from the environment
+ * or a mounted file (whose NAME/PATH lives in the secret-free config), never from
+ * `.warren.yaml`. Nothing here is ever logged verbatim.
+ */
+export async function resolveGithubAuth(
+  config: WarrenConfig,
+  env: WarrenEnv,
+  envSource: NodeJS.ProcessEnv,
+  logger: Logger,
+): Promise<ResolvedGithubAuth> {
+  const gh = config.github;
+  const mode = env.githubAuthMode ?? gh.auth;
+
+  // Webhook secret (both modes): name lives in config, value in the env.
+  const webhookSecret = envSource[gh.webhookSecretEnv] || undefined;
+
+  if (mode === "app") {
+    const appId = env.githubAppId ?? gh.appId;
+    const installationId = env.githubAppInstallationId ?? gh.installationId;
+    // Private key: a mounted file path wins over the env var (never inline in config).
+    let privateKeyPem: string | undefined;
+    if (gh.privateKeyPath) {
+      privateKeyPem = await readFile(gh.privateKeyPath, "utf8");
+    } else {
+      privateKeyPem = envSource[gh.privateKeyEnv] || undefined;
+    }
+
+    const tokenProvider = createTokenProvider({
+      mode: "app",
+      appId,
+      installationId,
+      privateKeyPem,
+      logger,
+    });
+    logger.info(`github: auth mode=app (${tokenProvider?.describe() ?? "app"})`);
+
+    // Resolve the bot login: env > config > GET /app (best-effort).
+    let botLogin = env.githubBotLogin ?? gh.botLogin;
+    if (!botLogin && tokenProvider instanceof AppTokenProvider) {
+      botLogin = (await tokenProvider.getBotLogin()) ?? undefined;
+      if (botLogin) logger.info(`github: resolved bot login ${botLogin}`);
+    }
+    return { mode, tokenProvider, botLogin, webhookSecret };
+  }
+
+  // pat mode (default).
+  const tokenProvider = createTokenProvider({ mode: "pat", token: env.githubToken });
+  if (tokenProvider) logger.info("github: auth mode=pat");
+  const botLogin = env.githubBotLogin ?? gh.botLogin;
+  return { mode: "pat", tokenProvider, botLogin, webhookSecret };
 }
