@@ -9,7 +9,8 @@
 // pre-materialize, at poll time). THIS module's release check needs the materialized
 // file list, so it lives beside the pipeline.
 
-import type { WarrenConfig } from "../types.js";
+import type { ResolvedExecutionMode, WarrenConfig } from "../types.js";
+import { isAuthorAllowed } from "../trigger/policy.js";
 
 // ─────────────────────────── Release-only diff ───────────────────────────
 
@@ -100,4 +101,34 @@ export function effortSettings(effort: WarrenConfig["review"]["effort"]): Effort
     default:
       return { triage: false, verify: true, reviewerMaxTurns: 30 };
   }
+}
+
+// ─────────────────────────── Execution policy (SECURITY) ───────────────────────────
+
+/**
+ * Resolve the configured `review.execution` mode against the PR author into a concrete
+ * per-review capability: `static` (NO Bash — PR code is inspected, never executed) or
+ * `full` (Bash allowed). SECURITY-CRITICAL — this is what decides whether untrusted PR
+ * code can run arbitrary commands on the host.
+ *
+ *   • `static`  → always `static` (default; safest).
+ *   • `full`    → always `full` (repo owner has explicitly opted this repo into exec).
+ *   • `trusted` → `full` ONLY when the author is on `auto_review.authors` (a NON-EMPTY
+ *                 allowlist); everyone else — including every author when the allowlist
+ *                 is empty — gets `static`. This is the recommended posture for a repo
+ *                 that takes outside contributions: your own PRs run, strangers' don't.
+ *
+ * Fails safe: any unrecognized mode collapses to `static`.
+ */
+export function resolveExecution(cfg: WarrenConfig, author: string | undefined): ResolvedExecutionMode {
+  const mode = cfg.review.execution;
+  if (mode === "full") return "full";
+  if (mode === "trusted") {
+    const allow = cfg.autoReview.authors;
+    // isAuthorAllowed returns true for an EMPTY allowlist ("review everyone"); for the
+    // execution gate an empty allowlist must mean "trust no one" → static. So require a
+    // non-empty allowlist AND membership.
+    return allow.length > 0 && isAuthorAllowed(author, allow) ? "full" : "static";
+  }
+  return "static";
 }

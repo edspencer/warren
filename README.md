@@ -192,6 +192,10 @@ commented starter. Keys are snake_case on disk.
 | `review.effort` | `normal` | `low` (no triage/verify, tight budget), `normal` (verify on), `high` (triage + verify, generous budget). Reasoning-effort proxy. |
 | `review.max_files` | `0` | Soft ceiling: skip a PR whose changed-file count exceeds this (`0` = no cap). |
 | `review.max_tokens` | `0` | Soft ceiling: skip a PR whose diff (est. ~4 chars/token) exceeds this (`0` = no cap). |
+| `review.execution` | `static` | **Security**: host access on the untrusted checkout. `static` = **no Bash** (inspect only), `full` = Bash allowed (trusted repos), `trusted` = full for `auto_review.authors`, static otherwise. See [Security posture](#security-posture) / [`SECURITY.md`](./SECURITY.md). |
+| `sandbox.mode` | `none` | **Design-only**: `docker` (roadmap) runs each review turn in an ephemeral sandbox. `none` runs in-process, boxed by `review.execution`. |
+| `sandbox.egress_allowlist` | GitHub + Anthropic | **Design-only** network-egress allowlist enforced once `sandbox.mode: docker` lands. |
+| `sandbox.memory_mb` / `.cpus` | `0` | **Design-only** container resource limits (`0` = runtime default). |
 | `path_filters` | excludes `dist`/lockfiles/`node_modules` | Globs of files to review; `!` excludes. |
 | `path_instructions` | `[]` | Extra `{ path, instructions }` guidance for the agent. |
 | `walkthrough.sequence_diagrams` | `false` | Add sequence diagrams to the walkthrough. |
@@ -243,20 +247,32 @@ API surface: `GET /` (dashboard SPA), `GET /api/overview`, `GET /api/repos`,
 
 ## Security posture
 
-Warren treats a PR as **untrusted input** — its diff and comments are attacker-
-controllable, so the design keeps the model boxed in:
+Warren treats a PR as **untrusted input** — its diff, file contents, and comments
+are attacker-controllable, so the design keeps the model boxed in. The full threat
+model + roadmap lives in **[`SECURITY.md`](./SECURITY.md)**; the highlights:
 
-- **The review agent holds no secrets.** Its environment is scrubbed of
-  credentials. Its *only* way to affect the outside world is the injected
-  `github_pr` MCP server, whose "write" tools merely record intent into a
-  host-side collector. The pipeline — not the agent — does the verify → gate →
-  post, using the token that never leaves the server.
+- **No arbitrary exec on untrusted code (default).** `review.execution: static`
+  (the default) gives the reviewer Read/Grep/Glob/Task only — **no `Bash`** — so a
+  malicious PR can't run code on the host. `full` (Bash) is opt-in for trusted repos;
+  `trusted` grants Bash only to allowlisted authors. A Bash denylist remains as
+  defense-in-depth but is **not** the boundary.
+- **The GitHub token never touches the checkout.** The PR is cloned with a
+  credential-free remote URL; the token is supplied to `git` via a command-scoped
+  credential helper reading the process env, so **nothing token-bearing is written to
+  `.git/config`** (a repo script's `cat .git/config` yields nothing).
+- **The review agent holds no write path but the MCP.** Its *only* way to affect the
+  outside world is the injected `github_pr` MCP server, whose "write" tools merely
+  record intent into a host-side collector. The pipeline — not the agent — does the
+  verify → gate → post, using the token that never enters the agent's toolset.
 - **COMMENT-only.** Warren posts reviews as `COMMENT` events. It never approves a
   PR and never requests changes in a way that gates merges.
 - **Dry-run by default.** Nothing is posted until you explicitly set `WARREN_LIVE=1`.
 - **No public ingress in poll mode.** Nothing inbound to attack.
 - **Secrets are never logged.** Diagnostics report only *presence* booleans
   (`hasGithubToken: true`), never values.
+- **Roadmap (design-only): sandbox + egress lockdown.** An ephemeral non-root,
+  read-only-rootfs container (`sandbox.mode: docker`) with resource limits and a
+  GitHub+Anthropic-only egress allowlist — schema-wired today, runtime not yet.
 
 ## Runtime & cost
 

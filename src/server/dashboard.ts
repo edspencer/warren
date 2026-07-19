@@ -836,6 +836,9 @@ const CFG_ENUMS = {
   "profile": ["chill", "assertive"],
   "min_severity": ["critical", "high", "medium", "low", "nit"],
   "trigger.mode": ["poll", "webhook", "tunnel"],
+  "review.effort": ["low", "normal", "high"],
+  "review.execution": ["static", "full", "trusted"],
+  "sandbox.mode": ["none", "docker"],
 };
 // Complex structures (arrays of objects) don't map to a flat form — edit via YAML.
 const CFG_FORM_SKIP = new Set(["repos", "path_instructions"]);
