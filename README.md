@@ -201,10 +201,13 @@ commented starter. Keys are snake_case on disk.
 | `walkthrough.sequence_diagrams` | `false` | Add sequence diagrams to the walkthrough. |
 | `walkthrough.poem` | `false` | Add a poem to the walkthrough. |
 | `commands_allowed` | all | Which `@warren` verbs are honored. |
-| `models.triage` / `.review` / `.verify` | haiku / opus / haiku | Model per pipeline stage. |
+| `models.triage` / `.review` / `.verify` | haiku / opus / haiku | Model per pipeline stage. **Any** Claude id works (global or per-repo) — e.g. drop `review` to `claude-sonnet-5` or `claude-haiku-4-5` to trade depth for cost. Known families are priced in the usage ledger; unknown ids still run (priced at the Opus rate). |
 | `resolve_on_fix` | `true` | Auto-resolve a review thread once its finding is fixed. |
 | `live` | `false` | Post for real (env `WARREN_LIVE` overrides). |
 | `concurrency` | `3` | Max concurrent review jobs. |
+| `limits.reviews_per_hour` / `.reviews_per_day` | `0` | **Rate limit** (global): max auto-reviews started per rolling hour / 24h (`0` = no cap). Explicit `@warren review` bypasses these count caps. |
+| `limits.tokens_per_hour` / `.tokens_per_day` | `0` | **Budget ceiling** (global): max real input+output tokens per rolling hour / 24h (`0` = no cap). Hard cap — applies even to explicit commands. |
+| `limits.cost_per_day_usd` | `0` | **Budget ceiling** (global): max **notional** list-price $/day across all reviews (`0` = no cap). Flat-billed on Max, so this is a budgeting signal, not an invoice. Hard cap. |
 | `repos` | `[]` | Watched repos (`github:` or `local_git:`, with optional `overrides:`). |
 
 ### Environment variables
@@ -285,6 +288,16 @@ Both drive the same pipeline; only how the agent turns are executed differs. Tri
 and verify run on a fast model (`claude-haiku-4-5`); the review pass uses Opus by
 default (all configurable under `models:`).
 
+**Usage ledger & rate limits.** Every review records its **real** token usage (input +
+output, summed across triage/review/verify) and a **notional** list-price cost, shown
+per-review and aggregated (hour / day / month / all-time) on the dashboard's Spend panel
+and at `GET /api/usage`. On the default `cli` runtime you're billed flat by your Max
+plan, so the dollar figure is a **budgeting / runaway-loop signal, not an invoice** — but
+the token counts are exact. Cap consumption with the global [`limits`](#warrenyaml) block
+(reviews-, tokens-, or cost-per-window); a rate-limited auto-review simply **defers** to
+the next poll. Trade cost for depth per repo by pointing `models.review` at Sonnet or
+Haiku in that repo's `overrides`.
+
 ## Status & roadmap
 
 **Shipped**
@@ -293,6 +306,7 @@ default (all configurable under `models:`).
 - Agentic review + adversarial verify + severity/dedup gate
 - Batched GitHub review + sticky walkthrough + coverage signal
 - Fingerprint dedup, resolve-on-fix
+- Real token/cost usage ledger + global time-windowed rate limits
 - `@warren` commands + conversational replies (session resume)
 - `review-local` and one-off `scripts/review-pr.ts` dry-run runners
 - Web dashboard with `none` / `jwt` auth
