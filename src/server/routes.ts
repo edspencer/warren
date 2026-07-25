@@ -132,6 +132,13 @@ export function registerRoutes(server: FastifyInstance, app: WarrenApp): void {
     };
   });
 
+  // Windowed token / notional-cost usage + the active rate limits (#rate-limits).
+  // Read-only; inherits the same auth policy as every other /api/* GET (open in
+  // `none` mode, bearer-required in `jwt` mode). The $ figure is a NOTIONAL
+  // list-price estimate (Warren bills flat-rate on the CLI runtime) — token
+  // counts are real; see review/limits.ts + review/usage.ts.
+  server.get("/api/usage", async () => app.rateLimiter.snapshot());
+
   // Watched repos + per-repo review count + last-review time.
   server.get("/api/repos", async () => {
     const records = await app.history.all();

@@ -107,6 +107,11 @@ walkthrough:
 commands_allowed: [review, full_review, pause, resume, resolve, help, ask]
 
 # Models per pipeline stage. Triage + verify use a fast model; review uses Opus.
+# Any Claude model id is accepted here (global or per-repo via `overrides`), so you
+# can trade cost for depth — e.g. downgrade `review` to `claude-sonnet-5` (or even
+# `claude-haiku-4-5`) on a busy/low-stakes repo, or run everything on Haiku to slash
+# spend. Known families (opus/sonnet/haiku/fable) are priced for the usage ledger;
+# an unknown id still runs (priced at the Opus rate as a conservative fallback).
 models:
   triage: claude-haiku-4-5-20251001
   review: claude-opus-4-8
@@ -138,6 +143,27 @@ live: false
 
 # Max concurrent review jobs across all watched repos.
 concurrency: 3
+
+# Time-windowed rate limits — a GLOBAL, fleet-wide ceiling so Warren can't run away
+# with tokens. Every field defaults to 0 = NO CAP (limits are off until you opt in).
+# Enforced BEFORE a review spends any tokens, counting completed reviews (from history)
+# plus in-flight ones. A rate-limited AUTO review is DEFERRED (it retries on the next
+# poll once the window frees), not dropped.
+#
+#   • Count windows (reviews_per_hour|day) are noise control — an explicit `@warren
+#     review` comment BYPASSES them (human override).
+#   • Spend windows (tokens_per_*, cost_per_day_usd) are a HARD budget ceiling — they
+#     apply even to explicit commands.
+#
+# NB: token counts are REAL (reported by the SDK); `cost_per_day_usd` is a NOTIONAL
+# list-price estimate (Warren bills flat on a Max plan) — a budgeting signal, not an
+# invoice. Limits are server-level/global; per-repo `overrides.limits` is not honored.
+limits:
+  reviews_per_hour: 0        # max auto-reviews started per rolling hour (0 = off)
+  reviews_per_day: 0         # max auto-reviews started per rolling 24h (0 = off)
+  tokens_per_hour: 0         # max input+output tokens per rolling hour (0 = off)
+  tokens_per_day: 0          # max input+output tokens per rolling 24h (0 = off)
+  cost_per_day_usd: 0        # max notional $/day across all reviews (0 = off)
 
 # Optional: pin watched repos here instead of (or in addition to) WARREN_REPOS.
 # Each entry is EXACTLY ONE of `github:` or `local_git:`, with optional per-repo

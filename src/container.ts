@@ -10,6 +10,7 @@ import { readEnv, type WarrenEnv } from "./config/env.js";
 import { loadWarrenConfig, reloadWarrenConfigInto, resolveRepoConfig } from "./config/load.js";
 import { createReviewStateStore, type ReviewStateStore } from "./state/store.js";
 import { createReviewHistoryStore, type ReviewHistoryStore } from "./state/history.js";
+import { createRateLimiter, type RateLimiter } from "./review/limits.js";
 import { createGitHubClient, type GitHubClient } from "./github/client.js";
 import {
   createReviewTargetProvider,
@@ -43,6 +44,8 @@ export interface WarrenApp {
   state: ReviewStateStore;
   /** Append-only review history powering the dashboard API. */
   history: ReviewHistoryStore;
+  /** Global rate limiter — admission gate + windowed-usage snapshot for /api/usage. */
+  rateLimiter: RateLimiter;
   provider: ReviewTargetProvider;
   config: WarrenConfig;
   env: WarrenEnv;
@@ -134,6 +137,14 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
   const state = createReviewStateStore(dataDir);
   const history = createReviewHistoryStore(dataDir);
 
+  // Global rate limiter (cost/runaway protection). Reads limits via a resolver so a
+  // hot config reload is honored; counts completed reviews from history + in-flight.
+  const rateLimiter = createRateLimiter({
+    limits: () => config.limits,
+    history,
+    logger,
+  });
+
   // GitHub client factory: one shared client per token (reads identical regardless of
   // key); WARREN_LIVE selects live vs dry-run. null for local-git targets.
   const sharedClient: GitHubClient | null = env.githubToken
@@ -168,6 +179,7 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
     fleet,
     state,
     history,
+    rateLimiter,
     config: configFor,
     clientFor,
     dataDir,
@@ -230,6 +242,7 @@ export async function createContainer(opts: CreateContainerOptions = {}): Promis
     fleet,
     state,
     history,
+    rateLimiter,
     provider,
     config,
     env,

@@ -91,6 +91,14 @@ export const DASHBOARD_HTML = String.raw`<!doctype html>
   .bar-track { background: var(--panel-2); border-radius: 6px; height: 16px; overflow: hidden; }
   .bar-fill { height: 100%; background: var(--accent); border-radius: 6px; min-width: 2px; }
 
+  /* Usage/limit rows on the Spend panel (rate limits). */
+  .limit-row { display: grid; grid-template-columns: 130px 1fr 118px; align-items: center; gap: 10px; margin: 8px 0; }
+  .limit-row .lk { color: var(--muted); font-size: 12px; }
+  .limit-row .lv { text-align: right; font-size: 12px; }
+  .limit-row.over .bar-fill { background: var(--crit); }
+  .spend-note { margin-top: 12px; font-size: 12px; }
+  @media (max-width: 640px) { .limit-row { grid-template-columns: 96px 1fr 92px; gap: 8px; } }
+
   /* ---------- Reviews-over-time chart (#13 — inline SVG, proportional) ---------- */
   .chart { width: 100%; }
   .chart svg { width: 100%; height: auto; display: block; overflow: visible; }
@@ -395,6 +403,20 @@ function showTokenBar(show) { document.getElementById("tokenBar").style.display 
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function fmtMs(ms) { if (ms == null) return "—"; if (ms < 1000) return ms + "ms"; return (ms/1000).toFixed(1) + "s"; }
 function fmtTime(iso) { if (!iso) return "—"; const d = new Date(iso); return d.toLocaleString(); }
+function fmtInt(n) { return String(n == null ? 0 : n); }
+// Humanize a token count (e.g. 1234 → "1.2K", 3_400_000 → "3.4M").
+function fmtTokens(n) {
+  if (n == null) return "—";
+  const a = Math.abs(n);
+  if (a < 1000) return String(n);
+  if (a < 1e6) return (n/1e3).toFixed(1).replace(/\.0$/, "") + "K";
+  if (a < 1e9) return (n/1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  return (n/1e9).toFixed(1).replace(/\.0$/, "") + "B";
+}
+// Notional list-price cost — always 2dp $ (NOT an invoice; see spend note).
+function fmtCost(n) { return n == null ? "—" : "$" + Number(n).toFixed(2); }
+// Total (input+output) tokens for a review record, or null when usage is absent.
+function recTokens(r) { return r && r.usage ? (r.usage.inputTokens || 0) + (r.usage.outputTokens || 0) : null; }
 function sevBadge(sev) { return '<span class="badge sev-' + esc(sev) + '">' + esc(sev) + '</span>'; }
 function card(label, value) {
   return '<div class="card"><div class="label">' + esc(label) + '</div><div class="value">' + esc(value) + '</div></div>';
@@ -459,21 +481,81 @@ function reviewRow(r) {
     (r.prNumber != null
       ? ' ' + (pr ? extLink(pr, '#' + r.prNumber + ' ↗') : '<span class="muted">#' + r.prNumber + '</span>')
       : '');
+  const tok = recTokens(r);
+  const tokCell = tok != null
+    ? fmtTokens(tok) + (r.costUsd != null ? ' <span class="muted">· ' + fmtCost(r.costUsd) + '</span>' : '')
+    : '<span class="muted">—</span>';
   return '<tr class="clickable" role="link" tabindex="0" data-href="/reviews/' + encodeURIComponent(r.id) + '"' +
     ' aria-label="Open review of ' + esc(r.repo) + (r.prNumber != null ? ' PR ' + r.prNumber : '') + '">' +
     '<td data-label="Repo">' + repoCell + '</td>' +
     '<td data-label="When" class="muted">' + fmtTime(r.timestamp) + '</td>' +
     '<td data-label="Files">' + r.stats.filesReviewed + '</td>' +
     '<td data-label="Findings">' + r.findingsPosted + '</td>' +
+    '<td data-label="Tokens" class="mono">' + tokCell + '</td>' +
     '<td data-label="Wall" class="muted">' + fmtMs(r.wallMs) + '</td>' +
     '<td data-label="Head" class="mono">' + esc((r.headSha || "").slice(0,7)) + '</td></tr>';
 }
 function reviewsTable(records, emptyMsg) {
   const rows = records.length ? records.map(reviewRow).join("")
-    : '<tr><td colspan="6" class="empty">' + esc(emptyMsg) + '</td></tr>';
+    : '<tr><td colspan="7" class="empty">' + esc(emptyMsg) + '</td></tr>';
   return '<table><thead><tr><th scope="col">Repo</th><th scope="col">When</th>' +
-    '<th scope="col">Files</th><th scope="col">Findings</th><th scope="col">Wall</th>' +
-    '<th scope="col">Head</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    '<th scope="col">Files</th><th scope="col">Findings</th><th scope="col">Tokens</th>' +
+    '<th scope="col">Wall</th><th scope="col">Head</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+// ───────────────────────── Spend / usage (rate limits) ─────────────────────────
+// A compact windowed view of token + notional-cost usage, plus how close each
+// configured limit is to its cap. "u" is GET /api/usage's UsageSnapshot.
+const SPEND_NOTE =
+  'The cost figure is a <strong>notional</strong> list-price estimate for budgeting and ' +
+  'runaway-loop protection — Warren runs on a flat-rate plan, so it is <strong>not</strong> ' +
+  'an invoice. Token counts are real.';
+
+function spendWindows(u) {
+  const rows = [["Today", u.day], ["This hour", u.hour], ["This month", u.month], ["All-time", u.allTime]]
+    .map(function (e) {
+      const w = e[1] || {};
+      return '<tr><td data-label="Window">' + esc(e[0]) + '</td>' +
+        '<td data-label="Reviews">' + fmtInt(w.reviews) + '</td>' +
+        '<td data-label="Tokens" class="mono">' + fmtTokens(w.totalTokens) + '</td>' +
+        '<td data-label="Cost" class="mono">' + fmtCost(w.costUsd) + '</td></tr>';
+    }).join("");
+  return '<table><thead><tr><th scope="col">Window</th><th scope="col">Reviews</th>' +
+    '<th scope="col">Tokens</th><th scope="col">Cost</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function spendLimits(u) {
+  const L = u.limits || {};
+  const defs = [
+    ["Reviews / hour", u.hour.reviews, L.reviewsPerHour, fmtInt],
+    ["Reviews / day", u.day.reviews, L.reviewsPerDay, fmtInt],
+    ["Tokens / hour", u.hour.totalTokens, L.tokensPerHour, fmtTokens],
+    ["Tokens / day", u.day.totalTokens, L.tokensPerDay, fmtTokens],
+    ["Cost / day", u.day.costUsd, L.costPerDayUsd, fmtCost],
+  ].filter(function (d) { return d[2] > 0; });
+  if (!defs.length) {
+    return '<div class="muted" style="margin-top:12px;font-size:12px">No usage limits configured — ' +
+      'set <span class="mono">limits</span> in Settings to cap Warren’s spend.</div>';
+  }
+  const rows = defs.map(function (d) {
+    const label = d[0], used = d[1] || 0, cap = d[2], fmt = d[3];
+    const pct = cap > 0 ? Math.min(100, (100 * used) / cap) : 0;
+    const over = used >= cap;
+    return '<div class="limit-row' + (over ? ' over' : '') + '">' +
+      '<div class="lk">' + esc(label) + '</div>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + pct.toFixed(1) + '%"></div></div>' +
+      '<div class="lv mono">' + fmt(used) + ' / ' + fmt(cap) + '</div></div>';
+  }).join("");
+  return '<div style="margin-top:14px"><div class="cfg-k" style="margin-bottom:6px">Active limits</div>' + rows + '</div>';
+}
+
+function spendPanel(u) {
+  if (!u) return "";
+  return '<div class="panel"><h3>Spend <span class="muted" style="text-transform:none;letter-spacing:0">— token &amp; notional cost usage</span></h3>' +
+    spendWindows(u) +
+    spendLimits(u) +
+    '<div class="spend-note muted">' + SPEND_NOTE + '</div>' +
+    '</div>';
 }
 
 // ───────────────────────── GitHub links (#14) ─────────────────────────
@@ -564,10 +646,11 @@ function mdToHtml(src) {
 async function renderOverview() {
   // Signal-first (#17): totals are a compact clickable strip; the body is recent
   // activity + attention-worthy findings you can click straight into.
-  const [o, recent, allFindings] = await Promise.all([
+  const [o, recent, allFindings, usage] = await Promise.all([
     api("/api/overview"),
     api("/api/reviews?limit=6"),
     api("/api/findings"),
+    api("/api/usage"),
   ]);
   const sev = o.totalFindings.bySeverity;
 
@@ -590,6 +673,7 @@ async function renderOverview() {
       card("Mean wall time", fmtMs(o.meanWallMs)) +
       card("Last review", o.lastReviewAt ? fmtTime(o.lastReviewAt) : "—") +
     '</div>' +
+    spendPanel(usage) +
     '<div class="panel"><h3>Needs attention <span class="muted" style="text-transform:none;letter-spacing:0">— recent critical / high</span></h3>' + attentionHtml + '</div>' +
     '<div class="panel"><h3>Recent reviews</h3>' + recentHtml +
       (o.totalReviews > (recent.records || []).length ? '<div style="margin-top:10px"><a href="/reviews" data-link>View all reviews →</a></div>' : '') +
@@ -801,6 +885,14 @@ async function renderReviewDetail(id) {
 
   const pr = prUrl(r);
   const coverage = r.stats && r.stats.coverage;
+  const tok = recTokens(r);
+  const usageLine = r.usage
+    ? '<div class="muted" style="margin-top:6px">Tokens: ' + fmtTokens(r.usage.inputTokens) + ' in · ' +
+        fmtTokens(r.usage.outputTokens) + ' out' +
+        (r.usage.cacheReadTokens ? ' · ' + fmtTokens(r.usage.cacheReadTokens) + ' cache-read' : '') +
+        (r.costUsd != null ? ' · ' + fmtCost(r.costUsd) + ' notional (list-price estimate, not an invoice)' : '') +
+      '</div>'
+    : '';
 
   const html =
     backLink() +
@@ -811,10 +903,13 @@ async function renderReviewDetail(id) {
       card("Files", r.stats.filesReviewed) +
       card("Hunks", r.stats.hunksReviewed) +
       card("Wall", fmtMs(r.wallMs)) +
+      card("Tokens", tok != null ? fmtTokens(tok) : "—") +
+      card("Cost", r.costUsd != null ? fmtCost(r.costUsd) : "—") +
       card("Model", r.model || "—") +
     '</div>' +
     '<div class="panel"><h3>When</h3><div class="muted">' + fmtTime(r.timestamp) + ' · head <span class="mono">' + esc(r.headSha || "—") + '</span></div>' +
-      (coverage ? '<div class="muted" style="margin-top:6px">' + esc(coverage) + '</div>' : '') + '</div>' +
+      (coverage ? '<div class="muted" style="margin-top:6px">' + esc(coverage) + '</div>' : '') +
+      usageLine + '</div>' +
     (r.summary ? '<div class="panel"><h3>Summary</h3><div class="md">' + mdToHtml(r.summary) + '</div></div>' : '') +
     (r.walkthrough ? '<div class="panel"><h3>Walkthrough</h3><div class="md">' + mdToHtml(r.walkthrough) + '</div></div>' : '') +
     '<div class="panel"><h3>Findings (' + (r.findings || []).length + ')</h3>' + findings + '</div>';

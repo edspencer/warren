@@ -150,6 +150,18 @@ const WarrenConfigRawZ = z.object({
     .default({}),
   live: z.boolean().default(false), // env WARREN_LIVE overrides in load.ts
   concurrency: z.number().int().positive().default(3),
+  // Time-windowed rate limits (cost/runaway protection). 0 = no cap (all default 0,
+  // so limits are OFF until a user opts in). Enforced before a review spends tokens;
+  // see review/limits.ts. Per-repo overridable (count windows scope to that repo).
+  limits: z
+    .object({
+      reviews_per_hour: z.number().int().nonnegative().default(0),
+      reviews_per_day: z.number().int().nonnegative().default(0),
+      tokens_per_hour: z.number().int().nonnegative().default(0),
+      tokens_per_day: z.number().int().nonnegative().default(0),
+      cost_per_day_usd: z.number().nonnegative().default(0),
+    })
+    .default({}),
   repos: z.array(RepoConfigZ).default([]),
 });
 
@@ -256,6 +268,13 @@ export function toWarrenConfig(raw: WarrenConfigRaw): WarrenConfig {
     },
     live: raw.live,
     concurrency: raw.concurrency,
+    limits: {
+      reviewsPerHour: raw.limits.reviews_per_hour,
+      reviewsPerDay: raw.limits.reviews_per_day,
+      tokensPerHour: raw.limits.tokens_per_hour,
+      tokensPerDay: raw.limits.tokens_per_day,
+      costPerDayUsd: raw.limits.cost_per_day_usd,
+    },
     repos: raw.repos.map(mapRepo),
   };
 }
