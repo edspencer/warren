@@ -15,7 +15,7 @@ import { promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
 import * as path from "node:path";
 
-import type { Finding, ReviewResult, ReviewTarget } from "../types.js";
+import type { Finding, ReviewResult, ReviewTarget, TokenUsage } from "../types.js";
 import { repoLabel, targetKey } from "../types.js";
 
 /** A single finding as persisted in history (dashboard-facing subset of Finding). */
@@ -53,6 +53,11 @@ export interface HistoryRecord {
   timestamp: string; // ISO
   model: string; // review model
   wallMs: number;
+  // REAL token usage for this review, summed across all passes (see TokenUsage).
+  // Optional for back-compat: records written before this field read as "no usage".
+  usage?: TokenUsage;
+  // NOTIONAL list-price cost in USD (see review/usage.ts). Optional for back-compat.
+  costUsd?: number;
   stats: HistoryStats;
   summary: string;
   walkthrough: string;
@@ -102,6 +107,8 @@ export function recordFromResult(result: ReviewResult, now = new Date()): Histor
     timestamp: now.toISOString(),
     model: s.reviewModel,
     wallMs: s.durationMs,
+    ...(s.usage ? { usage: s.usage } : {}),
+    ...(s.costUsd != null ? { costUsd: s.costUsd } : {}),
     stats: {
       filesReviewed: s.filesReviewed,
       hunksReviewed: s.hunksReviewed,

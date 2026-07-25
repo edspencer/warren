@@ -23,6 +23,7 @@ import type {
   ReviewStats,
   ReviewTarget,
   Severity,
+  TokenUsage,
   WarrenConfig,
 } from "../types.js";
 import { targetKey } from "../types.js";
@@ -32,6 +33,8 @@ import { reviewerAgentConfig, triageAgentConfig, verifyAgentConfig } from "../he
 import { fingerprint, encodeFindingMarker, decodeFindingMarker } from "./fingerprint.js";
 import { effectiveMinSeverity, gateFindings, meetsSeverity } from "./gate.js";
 import { budgetSkipReason, effortSettings, isReleaseDiff, resolveExecution } from "./policy.js";
+import { addUsage, emptyUsage, reviewCostUsd } from "./usage.js";
+import type { RateLimiter } from "./limits.js";
 import { buildBatchVerifyPrompt, buildReviewPrompt, buildReviewSystemAppend, buildTriagePrompt, toPromptContext } from "./prompts.js";
 import { createReviewTargetProvider, type MaterializedTarget, type ReviewTargetProvider } from "./target.js";
 
@@ -47,6 +50,11 @@ export interface ReviewPipelineDeps {
   state: ReviewStateStore;
   /** Append-only review history (dashboard). Optional; skipped when absent. */
   history?: ReviewHistoryStore;
+  /**
+   * Global rate limiter (cost/runaway protection). Optional; when absent no windowed
+   * limits are enforced. Consulted BEFORE the review agent spends any tokens.
+   */
+  rateLimiter?: RateLimiter;
   /** Resolve the effective WarrenConfig for a target (per-repo overrides applied). */
   config: (target: ReviewTarget) => WarrenConfig;
   /** GitHub client for a github-pr target; null/absent for local-git. */
@@ -108,6 +116,8 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
     sinceSha: event.full ? "" : st.lastReviewedSha,
   });
 
+  // Released in the `finally` — the rate-limiter's in-flight slot (no-op until reserved).
+  let releaseSlot: () => void = () => {};
   try {
     if (mt.files.length === 0) {
       deps.logger.info(`pipeline: ${key} has no changed files; advancing lastReviewedSha.`);
@@ -145,6 +155,22 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
       }
     }
 
+    // Rate-limit admission (cost/runaway protection). Consulted AFTER the cheap skips
+    // but BEFORE any token is spent. A DENIED review is a TRANSIENT skip — we do NOT
+    // advance lastReviewedSha, so the next poll re-attempts once the window frees (a
+    // natural "defer"). Count windows (reviews/hour|day) bypass on an explicit @warren
+    // command; spend windows (tokens/*, cost/day) are a hard ceiling that applies to it.
+    if (deps.rateLimiter) {
+      const admit = await deps.rateLimiter.tryAdmit({ isCommand: event.reason === "command" });
+      if (!admit.admitted) {
+        deps.logger.warn(
+          `pipeline: ${key} rate-limited (${admit.reason}); deferring — will retry next poll.`,
+        );
+        return noopResult(target, cfg, start, "");
+      }
+      releaseSlot = admit.release;
+    }
+
     const ctx = toPromptContext(mt, cfg);
     const slug = agentSlug(target);
     const client = deps.clientFor?.(target) ?? null;
@@ -158,6 +184,9 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
       deps.logger.debug(`pipeline: ${key} running review in STATIC (no-Bash) execution mode.`);
     }
 
+    // Real token usage summed across every agent pass (triage + review + verify).
+    let usageTotal = emptyUsage();
+
     // 3. Triage pass — HOOK. Runs when review.effort=high (or deps.triage override).
     let walkthroughSkeleton = "";
     if (triageEnabled) {
@@ -165,13 +194,14 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
       await deps.fleet.addReviewAgent(
         triageAgentConfig({ name: triageName, workingDir: mt.checkoutDir, model: cfg.models.triage }),
       );
-      const { text } = await runAgentTurn({
+      const triageTurn = await runAgentTurn({
         fleet: deps.fleet,
         agentName: triageName,
         prompt: buildTriagePrompt(ctx),
         logger: deps.logger,
       });
-      walkthroughSkeleton = text;
+      usageTotal = addUsage(usageTotal, triageTurn.usage);
+      walkthroughSkeleton = triageTurn.text;
     }
 
     // 4. Review pass (agentic; findings come back via the github_pr MCP collector).
@@ -200,6 +230,7 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
       injectedMcpServers: { github_pr: reviewMcp.def },
       logger: deps.logger,
     });
+    usageTotal = addUsage(usageTotal, reviewTurn.usage);
 
     const rawFindings = reviewMcp.collector.getFindings();
     const summary = reviewMcp.collector.getSummary();
@@ -218,7 +249,9 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
     const toVerify = rawFindings.filter((f) => meetsSeverity(f.severity, minSev));
     let survivors: Map<string, { keep: boolean; confidence: number }> | null = null;
     if (verifyEnabled && toVerify.length > 0) {
-      survivors = await runVerifyPass(deps, mt, cfg, slug, toVerify, execution);
+      const verified = await runVerifyPass(deps, mt, cfg, slug, toVerify, execution);
+      survivors = verified.survivors;
+      usageTotal = addUsage(usageTotal, verified.usage);
     }
 
     const candidates: Finding[] = rawFindings.map((rf) =>
@@ -302,6 +335,8 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
       triageModel: cfg.models.triage,
       reviewModel: cfg.models.review,
       verifyModel: cfg.models.verify,
+      usage: usageTotal,
+      costUsd: reviewCostUsd(usageTotal, cfg.models.review),
     };
     const result: ReviewResult = {
       target,
@@ -327,6 +362,7 @@ async function runReview(deps: ReviewPipelineDeps, event: ReviewEvent): Promise<
 
     return result;
   } finally {
+    releaseSlot();
     await mt.dispose().catch(() => {});
   }
 }
@@ -347,7 +383,7 @@ async function runVerifyPass(
   slug: string,
   findings: RawFinding[],
   execution: "static" | "full",
-): Promise<Map<string, { keep: boolean; confidence: number }>> {
+): Promise<{ survivors: Map<string, { keep: boolean; confidence: number }>; usage: TokenUsage }> {
   const verifyName = `verify-${slug}`;
   await deps.fleet.addReviewAgent(
     verifyAgentConfig({
@@ -358,7 +394,7 @@ async function runVerifyPass(
     }),
   );
   const ctx = toPromptContext(mt, cfg);
-  const { text } = await runAgentTurn({
+  const { text, usage } = await runAgentTurn({
     fleet: deps.fleet,
     agentName: verifyName,
     prompt: buildBatchVerifyPrompt(findings, ctx),
@@ -376,7 +412,7 @@ async function runVerifyPass(
     deps.logger.warn(
       `pipeline: verify pass returned no parseable verdict JSON for ${slug}; failing open (keeping ${findings.length} candidate(s) at low confidence).`,
     );
-    return survivors;
+    return { survivors, usage };
   }
 
   const byFp = new Map(findings.map((f) => [fingerprint(f), f] as const));
@@ -388,7 +424,7 @@ async function runVerifyPass(
       confidence: clampConfidence(v.confidence, v.keep === false ? 0 : FAIL_OPEN_CONFIDENCE),
     });
   }
-  return survivors;
+  return { survivors, usage };
 }
 
 /** Confidence used when a candidate keeps but has no explicit verify score (>= gate min). */

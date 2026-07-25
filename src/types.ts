@@ -104,6 +104,20 @@ export type RawFinding = Omit<Finding, "fingerprint" | "verified" | "confidence"
 
 // ─────────────────────────── Review result ──────────────────────────────
 
+/**
+ * Real token usage for a review, aggregated across every agent pass (triage +
+ * review + verify). On the CLI runtime (Warren's billing path) only input/output
+ * tokens are reported by the SDK; the cache fields are 0 there but populated if a
+ * future SDK runtime provides them. See review/usage.ts for the aggregation +
+ * pricing helpers.
+ */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}
+
 export interface ReviewStats {
   filesReviewed: number;
   hunksReviewed: number; // total diff hunks across changed files (coverage signal)
@@ -115,6 +129,13 @@ export interface ReviewStats {
   triageModel: string;
   reviewModel: string;
   verifyModel: string;
+  // Real token usage summed across all passes (see TokenUsage). Absent on very old
+  // records / no-op results that spent nothing.
+  usage?: TokenUsage;
+  // NOTIONAL cost in USD, computed from a per-model list-price table (review/usage.ts).
+  // On a Max-plan (flat-rate) deployment this is a budgeting/runaway-loop signal, NOT
+  // an invoice. Absent when usage is absent.
+  costUsd?: number;
 }
 
 export interface ReviewResult {
@@ -253,6 +274,22 @@ export interface WarrenConfig {
   live: boolean; // resolved: WARREN_LIVE OR config; false = dry-run
   repos: RepoConfig[]; // watched repos (server-level config)
   concurrency: number; // max parallel reviews (JobQueue)
+  // Time-windowed rate limits so Warren can't run away with tokens. All 0 = off.
+  // Enforced BEFORE a review spends tokens (review/limits.ts). Count-based windows
+  // (reviewsPerHour/Day) are noise control — an explicit @warren command bypasses
+  // them. Spend-based windows (tokensPer*, costPerDayUsd) are a HARD budget ceiling
+  // that applies even to commands. Per-repo overrides scope the count windows to that
+  // repo; global windows count every watched repo. See review/limits.ts.
+  limits: RateLimits;
+}
+
+/** Time-windowed rate limits. 0 (the default for every field) means "no cap". */
+export interface RateLimits {
+  reviewsPerHour: number;
+  reviewsPerDay: number;
+  tokensPerHour: number; // input+output tokens
+  tokensPerDay: number;
+  costPerDayUsd: number; // notional list-price cost (see TokenUsage/review usage)
 }
 
 export interface RepoConfig {

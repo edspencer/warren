@@ -11,7 +11,8 @@
 // shape is loose (`[key: string]: unknown`), so extraction is defensive.
 
 import type { InjectedMcpServerDef, SDKMessage, TriggerResult } from "@herdctl/core";
-import type { Logger } from "../types.js";
+import type { Logger, TokenUsage } from "../types.js";
+import { addUsage, emptyUsage, extractUsage } from "../review/usage.js";
 import type { FleetWrapper } from "./fleet.js";
 
 export interface RunAgentTurnArgs {
@@ -35,6 +36,8 @@ export interface RunAgentTurnResult {
   result: TriggerResult;
   /** Concatenated assistant text emitted during the turn (for logging/summaries). */
   text: string;
+  /** REAL token usage for this turn (see review/usage.ts). Zero if the SDK reported none. */
+  usage: TokenUsage;
 }
 
 /**
@@ -52,6 +55,14 @@ export async function runAgentTurn(args: RunAgentTurnArgs): Promise<RunAgentTurn
     logger?.debug(`[${agentName}] ${text.length > 200 ? `${text.slice(0, 200)}…` : text}`);
   };
 
+  // Token accounting. The SDK's own `result` message carries the authoritative
+  // aggregate (input+output on the CLI runtime; full breakdown on an SDK runtime), so
+  // prefer it. As a fallback — should a `result` message not surface via onMessage — we
+  // sum the per-turn `assistant` usages, which equals the same total. We never ADD both
+  // (result IS the sum of the assistant turns), so there's no double counting.
+  let resultUsage: TokenUsage | null = null;
+  let assistantSum = emptyUsage();
+
   const result = await fleet.trigger(agentName, {
     prompt: args.prompt,
     resume: args.resume,
@@ -59,11 +70,18 @@ export async function runAgentTurn(args: RunAgentTurnArgs): Promise<RunAgentTurn
     systemPromptAppend: args.systemPromptAppend,
     onJobCreated: args.onJobCreated,
     onMessage: (m: SDKMessage) => {
-      for (const t of extractAssistantText(m)) record(t);
+      if (m?.type === "assistant") {
+        for (const t of extractAssistantText(m)) record(t);
+        const u = extractUsage(m);
+        if (u) assistantSum = addUsage(assistantSum, u);
+      } else if (m?.type === "result") {
+        const u = extractUsage(m);
+        if (u) resultUsage = u;
+      }
     },
   });
 
-  return { result, text: chunks.join("\n") };
+  return { result, text: chunks.join("\n"), usage: resultUsage ?? assistantSum };
 }
 
 /** Pull any assistant-visible text out of a (loosely-typed) herdctl SDKMessage. */
