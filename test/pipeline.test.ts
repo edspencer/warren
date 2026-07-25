@@ -7,9 +7,11 @@ import { createReviewPipeline } from "../src/review/pipeline.js";
 import { createReviewTargetProvider } from "../src/review/target.js";
 import { fingerprint } from "../src/review/fingerprint.js";
 import type { FleetWrapper } from "../src/herd/fleet.js";
-import type { LocalGitTarget, Logger, ReviewEvent, WarrenConfig } from "../src/types.js";
+import type { LocalGitTarget, Logger, ReviewEvent, TokenUsage, WarrenConfig } from "../src/types.js";
 import { targetKey } from "../src/types.js";
 import { runGit } from "../src/review/target.js";
+import { createReviewHistoryStore } from "../src/state/history.js";
+import type { RateLimiter } from "../src/review/limits.js";
 
 // ─────────────────────────── Fixtures ───────────────────────────
 
@@ -398,6 +400,165 @@ describe("recall + coverage + walkthrough (default low config)", () => {
     expect(report).toContain("## Summary");
     expect(report).toContain("## Walkthrough");
     expect(report.split(summary).length - 1).toBe(1);
+    await rm(dd, { recursive: true, force: true });
+  });
+});
+
+// ─────────────────────────── Usage + rate-limit integration ───────────────────────────
+//
+// The same HIGH/MED/LOW fake as the first block, but every agent turn ALSO emits a
+// `result` SDK message carrying a usage block — exactly the seam runAgentTurn reads —
+// so the pipeline aggregates REAL per-pass token usage and prices it.
+
+const PER_TURN_USAGE = { input_tokens: 1000, output_tokens: 500 };
+
+/** Fake fleet whose reviewer + verify turns each emit a `result` usage block. */
+function fakeFleetWithUsage(): FleetWrapper {
+  let n = 0;
+  const ok = (agentName: string): TriggerResult => ({
+    jobId: `job-${++n}`,
+    agentName,
+    scheduleName: null,
+    startedAt: new Date().toISOString(),
+    success: true,
+    sessionId: `sess-${n}`,
+  });
+  return {
+    fleet: {} as never,
+    async addReviewAgent() {
+      return { name: "fake" } as never;
+    },
+    async trigger(agentName, opts) {
+      if (agentName.startsWith("reviewer-")) {
+        await callTool(opts.injectedMcpServers, "submit_review", {
+          summary: "Three issues found.",
+          walkthrough: "Walkthrough: changed a.txt and added src/new.ts.",
+          findings: [HIGH, MED, LOW],
+        });
+      } else if (agentName.startsWith("verify-")) {
+        const verdicts = [
+          { id: fingerprint(HIGH), keep: true, confidence: 0.9, reason: "Confirmed." },
+          { id: fingerprint(MED), keep: false, confidence: 0.1, reason: "Refuted." },
+        ];
+        emitText(opts, `\`\`\`json\n${JSON.stringify(verdicts)}\n\`\`\``);
+      }
+      // Every turn reports its token usage via a `result` message.
+      opts.onMessage?.({ type: "result", usage: PER_TURN_USAGE } as never);
+      return ok(agentName);
+    },
+    async cancel() {},
+    async stop() {},
+  };
+}
+
+describe("review usage accounting + rate limiting", () => {
+  async function freshDeps() {
+    const dd = await mkdtemp(join(tmpdir(), "warren-pipe-data-"));
+    const state = (await import("../src/state/store.js")).createReviewStateStore(dd);
+    return { dd, state };
+  }
+
+  it("aggregates token usage + notional cost onto stats and the history record", async () => {
+    const { dd, state } = await freshDeps();
+    const provider = createReviewTargetProvider({ dataDir: dd, pathFilters: [] });
+    const history = createReviewHistoryStore(dd);
+    const pipeline = createReviewPipeline({
+      provider,
+      fleet: fakeFleetWithUsage(),
+      state,
+      history,
+      config: () => makeConfig(),
+      dataDir: dd,
+      logger: silentLogger,
+    });
+
+    const t: LocalGitTarget = { ...target(), label: "local:usage" };
+    const result = await pipeline.run({
+      target: t,
+      reason: "manual",
+      full: true,
+      receivedAt: new Date().toISOString(),
+    });
+
+    // Normal effort runs reviewer + verify → two turns each reporting PER_TURN_USAGE.
+    expect(result.stats.usage).toBeDefined();
+    expect(result.stats.usage?.inputTokens).toBe(2 * PER_TURN_USAGE.input_tokens);
+    expect(result.stats.usage?.outputTokens).toBe(2 * PER_TURN_USAGE.output_tokens);
+    // Notional cost priced at the review model (opus) — strictly positive.
+    expect(result.stats.costUsd).toBeGreaterThan(0);
+
+    // The appended history record carries the same usage + cost.
+    const all = await history.all();
+    expect(all).toHaveLength(1);
+    expect(all[0].usage).toEqual(result.stats.usage);
+    expect(all[0].costUsd).toBe(result.stats.costUsd);
+    expect(all[0].costUsd).toBeGreaterThan(0);
+
+    await rm(dd, { recursive: true, force: true });
+  });
+
+  it("a rate-limiter DENY is a no-op: no state advance, no history append, no agent run", async () => {
+    const { dd, state } = await freshDeps();
+    const provider = createReviewTargetProvider({ dataDir: dd, pathFilters: [] });
+    const history = createReviewHistoryStore(dd);
+
+    // A fleet that must never be triggered — admission gates before any token is spent.
+    const guardFleet: FleetWrapper = {
+      fleet: {} as never,
+      async addReviewAgent() {
+        throw new Error("addReviewAgent must not run when the review is rate-limited");
+      },
+      async trigger() {
+        throw new Error("trigger must not run when the review is rate-limited");
+      },
+      async cancel() {},
+      async stop() {},
+    };
+
+    let admitCalls = 0;
+    const denyingLimiter: RateLimiter = {
+      async tryAdmit() {
+        admitCalls += 1;
+        return { admitted: false, reason: "reviews/hour 5 ≥ limit 5" };
+      },
+      async snapshot() {
+        throw new Error("snapshot not used in this test");
+      },
+    };
+
+    const t: LocalGitTarget = { ...target(), label: "local:denied" };
+    const key = targetKey(t);
+    const pipeline = createReviewPipeline({
+      provider,
+      fleet: guardFleet,
+      state,
+      history,
+      rateLimiter: denyingLimiter,
+      config: () => makeConfig(),
+      dataDir: dd,
+      logger: silentLogger,
+    });
+
+    const result = await pipeline.run({
+      target: t,
+      reason: "manual",
+      full: true,
+      receivedAt: new Date().toISOString(),
+    });
+
+    // The limiter was consulted and the review was a no-op.
+    expect(admitCalls).toBe(1);
+    expect(result.posted).toBe(false);
+    expect(result.findings).toHaveLength(0);
+    expect(result.stats.findingsRaw).toBe(0);
+
+    // lastReviewedSha was NOT advanced (so the next poll re-attempts once the window frees).
+    const st = await state.getPrState(key);
+    expect(st.lastReviewedSha ?? "").toBe("");
+
+    // Nothing was appended to history.
+    expect(await history.all()).toEqual([]);
+
     await rm(dd, { recursive: true, force: true });
   });
 });
