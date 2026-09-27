@@ -1,5 +1,31 @@
 # warren
 
+## 0.3.0
+
+### Minor Changes
+
+- [#33](https://github.com/edspencer/warren/pull/33) [`eafa1b4`](https://github.com/edspencer/warren/commit/eafa1b4451197ab400e867eab0aa6aee010d7fc2) Thanks [@edspencer](https://github.com/edspencer)! - Harden the reviewer against untrusted PR code ([#31](https://github.com/edspencer/warren/issues/31)):
+
+  - **Checkout token leak fixed.** The GitHub PR is now cloned with a credential-free
+    remote URL; the token is supplied to `git` via a command-scoped credential helper
+    that reads it from the process environment, so no token-bearing string is written to
+    the checkout's `.git/config` (was `https://x-access-token:<token>@…`). Reusing a
+    checkout also scrubs any legacy token a pre-hardening run persisted.
+  - **Execution policy — `review.execution: static | full | trusted` (default `static`).**
+    `static` removes `Bash` from the review/verify/ask agents entirely, so untrusted PR
+    code is inspected but never executed; `full` allows Bash (trusted repos); `trusted`
+    allows it only for authors on `auto_review.authors` (empty allowlist ⇒ nobody).
+    Per-repo overridable. The Bash denylist is tightened (curl/wget/nc/ssh/git config) as
+    defense-in-depth only.
+  - **Sandbox + egress (design-only).** New `SECURITY.md` threat model plus schema-wired
+    `sandbox.mode` / `sandbox.egress_allowlist` / resource-limit knobs for a roadmap
+    ephemeral-container sandbox with a GitHub+Anthropic-only egress allowlist. Clearly
+    marked implemented vs. design-only (the container runtime is not yet enforced).
+
+### Patch Changes
+
+- [#37](https://github.com/edspencer/warren/pull/37) [`2fdcd52`](https://github.com/edspencer/warren/commit/2fdcd52dff8c0b5e0f334778bed702d904aebfed) Thanks [@edspencer](https://github.com/edspencer)! - Security: bump `@herdctl/core` to `^5.33.2` ([edspencer/herdctl#467](https://github.com/edspencer/herdctl/pull/467)). On the CLI runtime (Warren's default), the injected `github_pr` MCP server was served over an HTTP bridge bound to `0.0.0.0` with no authentication, so anything on the network could call Warren's review tools (e.g. post fake findings) while a review ran. 5.33.2 requires a per-bridge bearer token, binds the CLI bridge to `127.0.0.1`, and passes `--mcp-config` as an owner-only temp file instead of inline JSON on the command line. No Warren code changes needed.
+
 ## 0.2.0
 
 ### Minor Changes
